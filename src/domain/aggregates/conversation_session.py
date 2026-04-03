@@ -133,8 +133,11 @@ class ConversationSession:
             chunk: The audio chunk to add
             
         Raises:
-            ValueError: If chunk format mismatches or is duplicate
+            ValueError: If chunk format mismatches, is duplicate, or call has ended
         """
+        if self.is_ended:
+            raise ValueError("Cannot add audio to an ended conversation")
+
         # Validate audio format matches call format
         if chunk.audio_format != self._call_session.audio_format:
             raise ValueError("Audio format mismatch")
