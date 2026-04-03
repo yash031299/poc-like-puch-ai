@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 from src.domain.entities.call_session import CallSession
 from src.domain.entities.audio_chunk import AudioChunk
 from src.domain.entities.utterance import Utterance
+from src.domain.entities.ai_response import AIResponse
+from src.domain.entities.speech_segment import SpeechSegment
 from src.domain.value_objects.stream_identifier import StreamIdentifier
 from src.domain.value_objects.audio_format import AudioFormat
 
@@ -29,6 +31,8 @@ class ConversationSession:
         self._audio_chunks: List[AudioChunk] = []
         self._buffered_chunks: Dict[int, AudioChunk] = {}  # sequence -> chunk
         self._utterances: List[Utterance] = []
+        self._ai_responses: List[AIResponse] = []
+        self._speech_segments: List[SpeechSegment] = []
     
     @classmethod
     def create(
@@ -197,14 +201,46 @@ class ConversationSession:
             utterance: The utterance to add
         """
         self._utterances.append(utterance)
-    
+
+    # ── AIResponse ────────────────────────────────────────────────────────────
+
+    @property
+    def ai_responses(self) -> List[AIResponse]:
+        """Get all AI responses for this conversation."""
+        return list(self._ai_responses)
+
+    @property
+    def latest_ai_response(self) -> Optional[AIResponse]:
+        """Get the most recently added AI response, or None."""
+        return self._ai_responses[-1] if self._ai_responses else None
+
+    def add_ai_response(self, response: AIResponse) -> None:
+        """Add an AI-generated response to the conversation."""
+        self._ai_responses.append(response)
+
+    def get_ai_responses_for(self, utterance_id: str) -> List[AIResponse]:
+        """Get all AI responses linked to a specific utterance."""
+        return [r for r in self._ai_responses if r.utterance_id == utterance_id]
+
+    # ── SpeechSegment ─────────────────────────────────────────────────────────
+
+    @property
+    def speech_segments(self) -> List[SpeechSegment]:
+        """Get all synthesized speech segments for this conversation."""
+        return list(self._speech_segments)
+
+    def add_speech_segment(self, segment: SpeechSegment) -> None:
+        """Add a synthesized speech segment to the conversation."""
+        self._speech_segments.append(segment)
+
+    def get_speech_segments_for(self, response_id: str) -> List[SpeechSegment]:
+        """Get all speech segments linked to a specific AI response, ordered by position."""
+        return sorted(
+            [s for s in self._speech_segments if s.response_id == response_id]
+        )
+
     def __eq__(self, other: object) -> bool:
-        """
-        Check equality based on stream_identifier (aggregate identity).
-        
-        Business Rule: Two ConversationSessions are the same if they
-        have the same stream_identifier.
-        """
+        """Check equality based on stream_identifier (aggregate identity)."""
         if not isinstance(other, ConversationSession):
             return False
         return self.stream_identifier == other.stream_identifier
