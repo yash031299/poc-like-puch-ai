@@ -111,7 +111,13 @@ class CallSession:
         self._state = "active"
     
     def end(self) -> None:
-        """Transition call to ended state."""
+        """Transition call to ended state.
+
+        Raises:
+            ValueError: If call is already ended.
+        """
+        if self._state == "ended":
+            raise ValueError("Cannot end an already-ended call")
         self._state = "ended"
         self._ended_at = datetime.now(timezone.utc)
     

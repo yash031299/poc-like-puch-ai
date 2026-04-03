@@ -74,7 +74,27 @@ class ConversationSession:
     def stream_identifier(self) -> StreamIdentifier:
         """Get the unique stream identifier for this conversation."""
         return self._call_session.stream_identifier
-    
+
+    @property
+    def stream_id(self) -> str:
+        """Convenience property: stream identifier as plain string."""
+        return str(self._call_session.stream_identifier)
+
+    @property
+    def caller_number(self) -> str:
+        """Phone number of the caller."""
+        return self._call_session.caller_number
+
+    @property
+    def called_number(self) -> str:
+        """Phone number that was dialed (AI agent's number)."""
+        return self._call_session.called_number
+
+    @property
+    def is_active(self) -> bool:
+        """True when the session is in the active state."""
+        return self._call_session.state == "active"
+
     @property
     def is_ended(self) -> bool:
         """Check if the conversation has ended."""

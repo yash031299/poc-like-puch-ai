@@ -166,10 +166,13 @@ async def websocket_stream(websocket: WebSocket) -> None:
     """
     Primary Exotel AgentStream WebSocket endpoint.
 
-    URL: wss://<host>/stream?sample-rate=16000
+    URL: wss://<host>/stream?sample-rate=8000
     Exotel connects here when a call is routed to your VoiceBot Applet.
+
+    Exotel will disconnect if the server doesn't respond within 10 seconds.
+    One automatic retry on handshake failure.
     """
-    # Pass sample-rate from query params if provided
+    # Per-connection sample-rate override from Exotel query params
     qs_rate = websocket.query_params.get("sample-rate")
     if qs_rate and qs_rate.isdigit():
         _ws_handler._sample_rate = int(qs_rate)
@@ -177,9 +180,16 @@ async def websocket_stream(websocket: WebSocket) -> None:
     try:
         await _ws_handler.handle(websocket)
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected cleanly")
+        logger.info("WebSocket disconnected cleanly (Exotel closed connection)")
     except Exception as exc:
         logger.error("Unexpected WebSocket error: %s", exc, exc_info=True)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all handler — log unexpected errors and return 500."""
+    logger.error("Unhandled exception on %s: %s", request.url.path, exc, exc_info=True)
+    return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 
 
 if __name__ == "__main__":
