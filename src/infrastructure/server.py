@@ -7,12 +7,24 @@ Run with:
 Or directly:
     uvicorn src.infrastructure.server:app --host 0.0.0.0 --port 8000 --reload
 
-Environment variables required (see .env.example):
+Environment variables (see .env.example):
     GEMINI_API_KEY           — Google Gemini API key (free tier)
     GOOGLE_APPLICATION_CREDENTIALS — path to Google Cloud service account JSON
-    SAMPLE_RATE              — 8000 | 16000 | 24000 (default: 16000)
+    SAMPLE_RATE              — 8000 | 16000 | 24000 (default: 8000)
     PORT                     — server port (default: 8000)
     LOG_LEVEL                — DEBUG | INFO | WARNING (default: INFO)
+    LOG_FORMAT               — text | json (default: text)
+
+DEV / LOCAL TESTING (no API keys needed):
+    DEV_MODE=true python -m src.infrastructure.server
+
+    In DEV_MODE all three AI adapters are replaced with zero-credential stubs:
+      StubSTTAdapter  → returns hardcoded transcript every 3 audio chunks
+      StubLLMAdapter  → returns hardcoded response words
+      StubTTSAdapter  → returns 440 Hz sine-wave PCM audio (real audio, no cloud)
+
+    This lets you validate the full Exotel protocol + pipeline locally using
+    scripts/sim_exotel.py without any Exotel KYC, Google Cloud, or Gemini key.
 """
 
 import logging
@@ -32,6 +44,9 @@ from fastapi.responses import JSONResponse
 from src.adapters.gemini_llm_adapter import GeminiLLMAdapter
 from src.adapters.google_stt_adapter import GoogleSTTAdapter
 from src.adapters.google_tts_adapter import GoogleTTSAdapter
+from src.adapters.stub_stt_adapter import StubSTTAdapter
+from src.adapters.stub_llm_adapter import StubLLMAdapter
+from src.adapters.stub_tts_adapter import StubTTSAdapter
 from src.adapters.in_memory_session_repository import InMemorySessionRepository
 from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
 from src.infrastructure.exotel_caller_audio_adapter import ExotelCallerAudioAdapter
@@ -54,29 +69,48 @@ async def lifespan(app: FastAPI):
     """Initialise all adapters and use cases on startup."""
     global _session_repo, _ws_handler
 
+    dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("true", "1", "yes")
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     sample_rate = int(os.environ.get("SAMPLE_RATE", "8000"))  # Exotel default is 8000 Hz
     language_code = os.environ.get("LANGUAGE_CODE", "en-US")
     tts_voice = os.environ.get("TTS_VOICE", "en-US-Neural2-F")
 
-    if not gemini_key:
-        logger.warning("GEMINI_API_KEY not set — LLM responses will fail")
-
     # ── Adapters ───────────────────────────────────────────────────────────────
-    # STT/TTS providers are interchangeable — swap the adapter classes here
-    # to use Deepgram, Whisper, ElevenLabs, etc. without touching use cases.
-    # Future: read STT_PROVIDER / TTS_PROVIDER env vars to select at runtime.
+    # STT/TTS/LLM providers are interchangeable — only this block changes when
+    # swapping providers (Deepgram, Whisper, ElevenLabs, etc.).
     _session_repo = InMemorySessionRepository()
 
-    llm = GeminiLLMAdapter(api_key=gemini_key)
-    stt = GoogleSTTAdapter(language_code=language_code)
-    tts = GoogleTTSAdapter(
-        language_code=language_code,
-        voice_name=tts_voice,
-        sample_rate=sample_rate,
-    )
+    if dev_mode:
+        # Zero-credential stubs — full pipeline works with NO API keys.
+        # Use DEV_MODE=true for local testing / Exotel simulator.
+        logger.info(
+            "🔧 DEV_MODE enabled — using stub adapters (no API keys required). "
+            "StubSTT triggers every 3 chunks. StubTTS emits 440 Hz sine wave."
+        )
+        stt = StubSTTAdapter(
+            transcript="Hello, can you hear me? This is a local test.",
+            trigger_every=3,
+        )
+        llm = StubLLMAdapter(
+            response=(
+                "Hello! I am your AI voice assistant and I am working correctly. "
+                "The full pipeline is operational."
+            )
+        )
+        tts = StubTTSAdapter(sample_rate=sample_rate, duration_ms=400)
+    else:
+        # Production adapters — require valid credentials in environment.
+        if not gemini_key:
+            logger.warning("GEMINI_API_KEY not set — LLM responses will fail at call time")
+        llm = GeminiLLMAdapter(api_key=gemini_key)
+        stt = GoogleSTTAdapter(language_code=language_code)
+        tts = GoogleTTSAdapter(
+            language_code=language_code,
+            voice_name=tts_voice,
+            sample_rate=sample_rate,
+        )
 
-    # CallerAudioAdapter is per-connection; factory injected into use case layer
+    # CallerAudioAdapter: sends TTS audio back over the active WebSocket
     audio_out = ExotelCallerAudioAdapter()
 
     # ── Use cases ──────────────────────────────────────────────────────────────
@@ -86,7 +120,6 @@ async def lifespan(app: FastAPI):
     stream_uc = StreamResponseUseCase(
         session_repo=_session_repo, tts=tts, audio_out=audio_out
     )
-
     process_uc = ProcessAudioUseCase(
         session_repo=_session_repo,
         stt=stt,
@@ -104,7 +137,8 @@ async def lifespan(app: FastAPI):
         reset_session=reset_uc,
     )
 
-    logger.info("✅ Puch AI Voice Server ready (sample_rate=%dHz)", sample_rate)
+    mode_label = "DEV (stubs)" if dev_mode else "PRODUCTION"
+    logger.info("✅ Puch AI Voice Server ready — mode=%s sample_rate=%dHz", mode_label, sample_rate)
     yield
     logger.info("Server shutting down. Active sessions: %d", len(_session_repo))
 
