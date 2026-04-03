@@ -38,6 +38,8 @@ class ExotelWebSocketHandler:
         sample_rate: int = 16000,
         audio_adapter=None,
         reset_session=None,  # ResetSessionUseCase — handles inbound 'clear' from Exotel
+        stt=None,  # SpeechToTextPort — held so we can flush its buffer on disconnect
+        buffer_manager=None,  # AudioBufferManager — for VAD-based buffering
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
@@ -45,6 +47,8 @@ class ExotelWebSocketHandler:
         self._sample_rate = sample_rate
         self._audio_adapter = audio_adapter
         self._reset_session = reset_session
+        self._stt = stt
+        self._buffer_manager = buffer_manager
 
     async def handle(self, websocket: Any) -> None:
         """
@@ -56,6 +60,7 @@ class ExotelWebSocketHandler:
         await websocket.accept()
 
         stream_id: Optional[str] = None
+        pending_audio_finalized = False
 
         try:
             while True:
@@ -92,6 +97,10 @@ class ExotelWebSocketHandler:
 
                 elif event == "stop":
                     if stream_id:
+                        # Flush any remaining buffered audio before ending call.
+                        # This preserves final caller utterance on stream teardown.
+                        await self._finalize_pending_audio(stream_id)
+                        pending_audio_finalized = True
                         if self._audio_adapter:
                             self._audio_adapter.unregister(stream_id)
                         await self._handle_stop(stream_id)
@@ -103,9 +112,13 @@ class ExotelWebSocketHandler:
 
                 elif event == "clear":
                     # Exotel sends 'clear' when caller says "start over".
-                    # Bot must reset its conversation context.
+                    # Bot must reset its conversation context AND clear audio buffer.
                     logger.info("Exotel clear received — resetting session context stream=%s", stream_id)
                     if stream_id:
+                        # Clear buffer manager state
+                        if hasattr(self, '_buffer_manager') and self._buffer_manager:
+                            self._buffer_manager.reset(stream_id)
+                            logger.info(f"Cleared audio buffer for stream {stream_id}")
                         await self._handle_clear(stream_id)
 
         except Exception as exc:
@@ -113,6 +126,14 @@ class ExotelWebSocketHandler:
         finally:
             if stream_id and self._audio_adapter:
                 self._audio_adapter.unregister(stream_id)
+            # Flush any accumulated audio buffer for this stream and then reset.
+            if stream_id and not pending_audio_finalized:
+                await self._finalize_pending_audio(stream_id)
+            if stream_id and self._buffer_manager:
+                self._buffer_manager.reset(stream_id)
+            # Flush any accumulated STT audio buffer for this stream
+            if stream_id and hasattr(self._stt, "flush"):
+                self._stt.flush(stream_id)
             try:
                 await websocket.close()
             except Exception:
@@ -221,3 +242,10 @@ class ExotelWebSocketHandler:
             except Exception as exc:
                 logger.error("ResetSession failed stream=%s: %s", stream_id, exc)
 
+    async def _finalize_pending_audio(self, stream_id: str) -> None:
+        """Run final VAD flush via use case if supported."""
+        if hasattr(self._process_audio, "finalize_stream"):
+            try:
+                await self._process_audio.finalize_stream(stream_id)
+            except Exception as exc:
+                logger.error("Finalize pending audio failed stream=%s: %s", stream_id, exc)

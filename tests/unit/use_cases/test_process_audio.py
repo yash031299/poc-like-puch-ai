@@ -25,6 +25,19 @@ class FakeSTT:
         yield Utterance(self.final_text, 0.95, True, datetime.now(timezone.utc))
 
 
+class FakeBufferManager:
+    def __init__(self):
+        self.flushed = {}
+        self.flush_calls = []
+
+    def add_chunk(self, stream_id, chunk):
+        return None
+
+    def flush(self, stream_id):
+        self.flush_calls.append(stream_id)
+        return self.flushed.get(stream_id)
+
+
 def _make_active_session(stream_id="s1"):
     from src.domain.aggregates.conversation_session import ConversationSession
     from src.domain.value_objects.stream_identifier import StreamIdentifier
@@ -86,3 +99,45 @@ def test_process_audio_raises_if_session_not_found() -> None:
             await use_case.execute(stream_id="missing", chunk=chunk)
 
     asyncio.run(run())
+
+
+def test_finalize_stream_flushes_buffered_audio() -> None:
+    from src.use_cases.process_audio import ProcessAudioUseCase
+    from src.domain.entities.audio_chunk import AudioChunk
+    from src.domain.value_objects.audio_format import AudioFormat
+
+    session = _make_active_session("s1")
+    repo = FakeSessionRepo(session)
+    stt = FakeSTT("Buffered done")
+    buffer_manager = FakeBufferManager()
+    use_case = ProcessAudioUseCase(session_repo=repo, stt=stt, buffer_manager=buffer_manager)
+
+    fmt = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
+    buffer_manager.flushed["s1"] = [
+        AudioChunk(1, datetime.now(timezone.utc), fmt, bytes(3200)),
+        AudioChunk(2, datetime.now(timezone.utc), fmt, bytes(3200)),
+    ]
+
+    async def run():
+        return await use_case.finalize_stream("s1")
+
+    utterances = asyncio.run(run())
+    assert len(utterances) == 2
+    assert utterances[-1].text == "Buffered done"
+    assert "s1" in buffer_manager.flush_calls
+
+
+def test_finalize_stream_returns_empty_when_no_buffered_audio() -> None:
+    from src.use_cases.process_audio import ProcessAudioUseCase
+
+    session = _make_active_session("s1")
+    repo = FakeSessionRepo(session)
+    stt = FakeSTT()
+    buffer_manager = FakeBufferManager()
+    use_case = ProcessAudioUseCase(session_repo=repo, stt=stt, buffer_manager=buffer_manager)
+
+    async def run():
+        return await use_case.finalize_stream("s1")
+
+    utterances = asyncio.run(run())
+    assert utterances == []

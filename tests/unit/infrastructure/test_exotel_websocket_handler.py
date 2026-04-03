@@ -46,10 +46,15 @@ class FakeAcceptCall:
 class FakeProcessAudio:
     def __init__(self):
         self.chunks_received = []
+        self.finalized_streams = []
 
     async def execute(self, stream_id, chunk):
         self.chunks_received.append(chunk)
         return []  # No utterances for simplicity in this test
+
+    async def finalize_stream(self, stream_id):
+        self.finalized_streams.append(stream_id)
+        return []
 
 
 class FakeEndCall:
@@ -72,6 +77,9 @@ class FakeCallerAudioAdapter:
 
     def unregister(self, stream_id: str) -> None:
         self.unregistered.append(stream_id)
+
+    def get_sent_segment_count(self, stream_id: str) -> int:
+        return 0
 
 
 def _make_session(stream_id="stream-test"):
@@ -420,3 +428,21 @@ def test_handler_closes_websocket_on_stop() -> None:
     asyncio.run(handler.handle(ws))
 
     assert ws.closed is True
+
+
+def test_handler_finalizes_pending_audio_on_stop() -> None:
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-finalize")
+    process_uc = FakeProcessAudio()
+    ws = FakeWebSocket([_start_msg("stream-finalize"), _stop_msg("stream-finalize")])
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=process_uc,
+        end_call=FakeEndCall(),
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert process_uc.finalized_streams == ["stream-finalize"]

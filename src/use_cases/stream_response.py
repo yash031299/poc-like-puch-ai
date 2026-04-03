@@ -39,9 +39,11 @@ class StreamResponseUseCase:
         if response is None:
             raise ValueError(f"AIResponse {response_id} not found in session {stream_id}")
 
+        session.set_speaking()
         async for segment in self._tts.synthesize(stream_id, response):
             session.add_speech_segment(segment)
             await self._audio_out.send_segment(stream_id, segment)
 
         response.mark_delivered()
+        session.set_listening()
         await self._repo.save(session)

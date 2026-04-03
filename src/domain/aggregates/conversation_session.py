@@ -33,6 +33,7 @@ class ConversationSession:
         self._utterances: List[Utterance] = []
         self._ai_responses: List[AIResponse] = []
         self._speech_segments: List[SpeechSegment] = []
+        self._interaction_state: str = "listening"
     
     @classmethod
     def create(
@@ -99,6 +100,11 @@ class ConversationSession:
     def is_ended(self) -> bool:
         """Check if the conversation has ended."""
         return self._call_session.state == "ended"
+
+    @property
+    def interaction_state(self) -> str:
+        """Current conversational interaction state: listening/thinking/speaking."""
+        return self._interaction_state
     
     @property
     def audio_chunks(self) -> List[AudioChunk]:
@@ -132,6 +138,7 @@ class ConversationSession:
         Business Rule: Transitions the call from initiated to active state.
         """
         self._call_session.activate()
+        self._interaction_state = "listening"
     
     def end(self) -> None:
         """
@@ -141,6 +148,25 @@ class ConversationSession:
         further modifications.
         """
         self._call_session.end()
+        self._interaction_state = "listening"
+
+    def set_listening(self) -> None:
+        """Mark conversation as listening for caller input."""
+        if self.is_ended:
+            raise ValueError("Cannot update interaction state of an ended conversation")
+        self._interaction_state = "listening"
+
+    def set_thinking(self) -> None:
+        """Mark conversation as thinking while STT/LLM pipeline is running."""
+        if self.is_ended:
+            raise ValueError("Cannot update interaction state of an ended conversation")
+        self._interaction_state = "thinking"
+
+    def set_speaking(self) -> None:
+        """Mark conversation as speaking while TTS is being streamed."""
+        if self.is_ended:
+            raise ValueError("Cannot update interaction state of an ended conversation")
+        self._interaction_state = "speaking"
     
     def add_audio_chunk(self, chunk: AudioChunk) -> None:
         """

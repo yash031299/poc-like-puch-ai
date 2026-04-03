@@ -24,6 +24,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "python-json-logger>=2.0.0",
     "uvloop>=0.17.0; sys_platform != 'win32'",
+    "webrtcvad-wheels>=2.0.14",
 ]
 
 [project.optional-dependencies]

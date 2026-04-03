@@ -25,6 +25,17 @@ DEV / LOCAL TESTING (no API keys needed):
 
     This lets you validate the full Exotel protocol + pipeline locally using
     scripts/sim_exotel.py without any Exotel KYC, Google Cloud, or Gemini key.
+
+HYBRID MODE (real STT+TTS, stub LLM — for testing when Gemini quota exhausted):
+    HYBRID_MODE=true python -m src.infrastructure.server
+
+    In HYBRID_MODE:
+      GoogleSTTAdapter  → real Google Cloud Speech-to-Text (tests buffering fix)
+      StubLLMAdapter    → returns hardcoded response (bypasses Gemini quota)
+      GoogleTTSAdapter  → real Google Cloud Text-to-Speech
+
+    Use this to test the STT audio buffering fix with real phone calls when
+    your Gemini free tier quota is exhausted.
 """
 
 import logging
@@ -48,6 +59,8 @@ from src.adapters.stub_stt_adapter import StubSTTAdapter
 from src.adapters.stub_llm_adapter import StubLLMAdapter
 from src.adapters.stub_tts_adapter import StubTTSAdapter
 from src.adapters.in_memory_session_repository import InMemorySessionRepository
+from src.adapters.webrtc_vad_adapter import WebRTCVADAdapter
+from src.domain.services.audio_buffer_manager import AudioBufferManager
 from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
 from src.infrastructure.exotel_caller_audio_adapter import ExotelCallerAudioAdapter
 from src.use_cases.accept_call import AcceptCallUseCase
@@ -70,10 +83,19 @@ async def lifespan(app: FastAPI):
     global _session_repo, _ws_handler
 
     dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("true", "1", "yes")
+    # HYBRID_MODE: real STT+TTS but stub LLM (for testing when Gemini quota exhausted)
+    hybrid_mode = os.environ.get("HYBRID_MODE", "false").lower() in ("true", "1", "yes")
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     sample_rate = int(os.environ.get("SAMPLE_RATE", "8000"))  # Exotel default is 8000 Hz
     language_code = os.environ.get("LANGUAGE_CODE", "en-US")
     tts_voice = os.environ.get("TTS_VOICE", "en-US-Neural2-F")
+
+    # VAD configuration
+    vad_enabled = os.environ.get("VAD_ENABLED", "true").lower() in ("true", "1", "yes")
+    vad_silence_threshold = int(os.environ.get("VAD_SILENCE_THRESHOLD_MS", "700"))
+    vad_sensitivity = int(os.environ.get("VAD_SENSITIVITY", "2"))
+    max_buffer_duration = int(os.environ.get("MAX_SPEECH_BUFFER_SECONDS", "30"))
+    enable_thinking_indicator = os.environ.get("ENABLE_THINKING_INDICATOR", "false").lower() in ("true", "1", "yes")
 
     # ── Adapters ───────────────────────────────────────────────────────────────
     # STT/TTS/LLM providers are interchangeable — only this block changes when
@@ -98,12 +120,31 @@ async def lifespan(app: FastAPI):
             )
         )
         tts = StubTTSAdapter(sample_rate=sample_rate, duration_ms=400)
+    elif hybrid_mode:
+        # Real STT+TTS but stub LLM — useful when Gemini quota exhausted.
+        # Use HYBRID_MODE=true to test STT buffering fix with real Google APIs.
+        logger.info(
+            "🔧 HYBRID_MODE enabled — real Google STT+TTS, stub LLM. "
+            "Use this to test STT audio buffering when Gemini quota is exhausted."
+        )
+        stt = GoogleSTTAdapter(language_code=language_code, sample_rate=sample_rate)
+        llm = StubLLMAdapter(
+            response=(
+                "Thank you for calling. I heard you clearly. "
+                "This is a hybrid test with real speech recognition but simulated AI response."
+            )
+        )
+        tts = GoogleTTSAdapter(
+            language_code=language_code,
+            voice_name=tts_voice,
+            sample_rate=sample_rate,
+        )
     else:
         # Production adapters — require valid credentials in environment.
         if not gemini_key:
             logger.warning("GEMINI_API_KEY not set — LLM responses will fail at call time")
         llm = GeminiLLMAdapter(api_key=gemini_key)
-        stt = GoogleSTTAdapter(language_code=language_code)
+        stt = GoogleSTTAdapter(language_code=language_code, sample_rate=sample_rate)
         tts = GoogleTTSAdapter(
             language_code=language_code,
             voice_name=tts_voice,
@@ -112,6 +153,26 @@ async def lifespan(app: FastAPI):
 
     # CallerAudioAdapter: sends TTS audio back over the active WebSocket
     audio_out = ExotelCallerAudioAdapter()
+
+    # ── VAD & Buffer Manager ──────────────────────────────────────────────────
+    buffer_manager = None
+    if vad_enabled:
+        try:
+            vad = WebRTCVADAdapter(sensitivity=vad_sensitivity)
+            buffer_manager = AudioBufferManager(
+                vad=vad,
+                silence_threshold_ms=vad_silence_threshold,
+                max_buffer_duration_seconds=max_buffer_duration
+            )
+            logger.info(
+                "✅ VAD enabled: sensitivity=%d, silence_threshold=%dms, max_buffer=%ds",
+                vad_sensitivity, vad_silence_threshold, max_buffer_duration
+            )
+        except Exception as e:
+            logger.error("Failed to initialize VAD: %s. Continuing without VAD.", e)
+            buffer_manager = None
+    else:
+        logger.info("VAD disabled — processing every audio chunk (may cause excessive LLM calls)")
 
     # ── Use cases ──────────────────────────────────────────────────────────────
     accept_uc = AcceptCallUseCase(session_repo=_session_repo)
@@ -123,6 +184,7 @@ async def lifespan(app: FastAPI):
     process_uc = ProcessAudioUseCase(
         session_repo=_session_repo,
         stt=stt,
+        buffer_manager=buffer_manager,  # NEW: Inject buffer manager
         generate_response=generate_uc,
         stream_response=stream_uc,
     )
@@ -135,12 +197,44 @@ async def lifespan(app: FastAPI):
         sample_rate=sample_rate,
         audio_adapter=audio_out,
         reset_session=reset_uc,
+        stt=stt,
+        buffer_manager=buffer_manager,  # NEW: Pass to handler for cleanup
     )
 
-    mode_label = "DEV (stubs)" if dev_mode else "PRODUCTION"
-    logger.info("✅ Puch AI Voice Server ready — mode=%s sample_rate=%dHz", mode_label, sample_rate)
+    mode_label = "DEV (stubs)" if dev_mode else ("HYBRID (real STT+TTS)" if hybrid_mode else "PRODUCTION")
+    vad_status = "enabled" if vad_enabled else "disabled"
+    logger.info(
+        "✅ Puch AI Voice Server ready — mode=%s sample_rate=%dHz VAD=%s",
+        mode_label, sample_rate, vad_status
+    )
+    
+    # Log VAD metrics on startup if enabled
+    if buffer_manager:
+        logger.info(
+            "   📊 VAD config: sensitivity=%d, silence=%dms, max_buffer=%ds",
+            vad_sensitivity, vad_silence_threshold, max_buffer_duration
+        )
+    logger.info("   🔔 Thinking indicator: %s", "enabled" if enable_thinking_indicator else "disabled")
+    
     yield
+    
+    # Log final metrics on shutdown
     logger.info("Server shutting down. Active sessions: %d", len(_session_repo))
+    if buffer_manager and _session_repo:
+        # Log aggregated buffer metrics
+        logger.info("VAD Buffer Metrics Summary:")
+        for stream_id in list(_session_repo._sessions.keys()) if hasattr(_session_repo, '_sessions') else []:
+            metrics = buffer_manager.get_metrics(stream_id)
+            sent_segments = audio_out.get_sent_segment_count(stream_id) if hasattr(audio_out, "get_sent_segment_count") else 0
+            logger.info(
+                "  Stream %s: buffered=%d flushes=%d flushed_chunks=%d flushed_audio_s=%.2f sent_segments=%d state=%s",
+                stream_id[:8], metrics['chunks_buffered'], 
+                metrics['flushes_count'],
+                metrics.get('chunks_flushed_total', 0),
+                metrics.get('audio_seconds_flushed_total', 0.0),
+                sent_segments,
+                metrics['state']
+            )
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────

@@ -23,6 +23,12 @@ class FakeLLM:
             yield token + " "
 
 
+class EmptyLLM:
+    async def generate(self, stream_id, utterance, context):
+        if False:
+            yield ""
+
+
 def _make_session_with_utterance(stream_id="s1"):
     from src.domain.aggregates.conversation_session import ConversationSession
     from src.domain.value_objects.stream_identifier import StreamIdentifier
@@ -58,6 +64,7 @@ def test_generate_response_creates_ai_response() -> None:
     assert response.utterance_id == utt.utterance_id
     assert response.state == "complete"
     assert len(response.text) > 0
+    assert session.interaction_state == "listening"
 
     # Stored in session
     assert len(session.ai_responses) == 1
@@ -73,5 +80,19 @@ def test_generate_response_raises_if_utterance_not_found() -> None:
     async def run():
         with pytest.raises(ValueError, match="Utterance not-found not found"):
             await use_case.execute(stream_id="s1", utterance_id="not-found")
+
+    asyncio.run(run())
+
+
+def test_generate_response_raises_on_empty_streamed_output() -> None:
+    from src.use_cases.generate_response import GenerateResponseUseCase
+
+    session, utt = _make_session_with_utterance()
+    repo = FakeSessionRepo(session)
+    use_case = GenerateResponseUseCase(session_repo=repo, llm=EmptyLLM())
+
+    async def run():
+        with pytest.raises(ValueError, match="Cannot complete a response with no text"):
+            await use_case.execute(stream_id="s1", utterance_id=utt.utterance_id)
 
     asyncio.run(run())

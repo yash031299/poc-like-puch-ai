@@ -85,6 +85,10 @@ def test_stt_adapter_with_fake_client() -> None:
     adapter = GoogleSTTAdapter.__new__(GoogleSTTAdapter)
     adapter._client = FakeSTTClient()
     adapter._language_code = "en-US"
+    # Set new buffering attributes: threshold below chunk size so STT fires immediately
+    adapter._buffers = {}
+    adapter._min_buffer_bytes = 3200  # exactly one chunk — triggers on first call
+    adapter._sample_rate = 16000
 
     fmt = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
     chunk = AudioChunk(1, datetime.now(timezone.utc), fmt, bytes(3200))
@@ -185,3 +189,39 @@ def test_tts_adapter_pads_last_chunk_to_320_multiple() -> None:
     for seg in segs:
         assert seg.size_bytes % 320 == 0
     assert segs[-1].is_last is True
+
+
+def test_tts_adapter_handles_tiny_audio_with_single_last_chunk() -> None:
+    """Even tiny synthesized output should produce one valid last segment."""
+    from src.adapters.google_tts_adapter import GoogleTTSAdapter
+    from src.domain.entities.ai_response import AIResponse
+    from src.domain.value_objects.audio_format import AudioFormat
+
+    class FakeTTSResponse:
+        audio_content = bytes(100)  # tiny output
+
+    class FakeTTSClient:
+        def synthesize_speech(self, input, voice, audio_config):
+            return FakeTTSResponse()
+
+    adapter = GoogleTTSAdapter.__new__(GoogleTTSAdapter)
+    adapter._client = FakeTTSClient()
+    adapter._language_code = "en-US"
+    adapter._voice_name = "en-US-Neural2-F"
+    adapter._sample_rate = 16000
+    adapter._audio_format = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
+
+    resp = AIResponse("utt-1", datetime.now(timezone.utc))
+    resp.append_text("Hi!")
+    resp.complete()
+
+    async def run():
+        segs = []
+        async for seg in adapter.synthesize("s1", resp):
+            segs.append(seg)
+        return segs
+
+    segs = asyncio.run(run())
+    assert len(segs) == 1
+    assert segs[0].is_last is True
+    assert segs[0].size_bytes == 3200

@@ -31,15 +31,18 @@ class ExotelCallerAudioAdapter(CallerAudioPort):
 
     def __init__(self) -> None:
         self._connections: Dict[str, Any] = {}  # stream_id -> websocket
+        self._sent_segment_counts: Dict[str, int] = {}
 
     def register(self, stream_id: str, websocket: Any) -> None:
         """Register an active WebSocket connection."""
         self._connections[stream_id] = websocket
+        self._sent_segment_counts.setdefault(stream_id, 0)
         logger.debug("Registered WebSocket for stream %s", stream_id)
 
     def unregister(self, stream_id: str) -> None:
         """Remove a WebSocket connection (call closed)."""
         self._connections.pop(stream_id, None)
+        self._sent_segment_counts.pop(stream_id, None)
         logger.debug("Unregistered WebSocket for stream %s", stream_id)
 
     async def send_segment(self, stream_id: str, segment: SpeechSegment) -> None:
@@ -58,8 +61,13 @@ class ExotelCallerAudioAdapter(CallerAudioPort):
 
         try:
             await websocket.send_text(message)
+            self._sent_segment_counts[stream_id] = self._sent_segment_counts.get(stream_id, 0) + 1
         except Exception as exc:
             logger.error("Failed to send audio to stream %s: %s", stream_id, exc)
+
+    def get_sent_segment_count(self, stream_id: str) -> int:
+        """Return number of media segments sent for this stream."""
+        return self._sent_segment_counts.get(stream_id, 0)
 
     async def send_mark(self, stream_id: str, label: str) -> None:
         """

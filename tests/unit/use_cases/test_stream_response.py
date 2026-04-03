@@ -78,6 +78,7 @@ def test_stream_response_sends_segments_to_caller() -> None:
 
     # Response marked delivered
     assert resp.state == "delivered"
+    assert session.interaction_state == "listening"
 
 
 def test_stream_response_raises_if_response_not_found() -> None:
