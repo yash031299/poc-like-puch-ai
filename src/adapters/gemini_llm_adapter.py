@@ -1,9 +1,10 @@
-"""GeminiLLMAdapter — LanguageModelPort backed by Google Gemini."""
+"""GeminiLLMAdapter — LanguageModelPort backed by Google Gemini (google-genai SDK)."""
 
 from typing import AsyncIterator
 import asyncio
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from src.domain.entities.utterance import Utterance
 from src.ports.language_model_port import LanguageModelPort
@@ -15,41 +16,51 @@ _SYSTEM_PROMPT = (
     "Be warm, natural, and conversational."
 )
 
+_DEFAULT_MODEL = "gemini-2.0-flash"
+
 
 class GeminiLLMAdapter(LanguageModelPort):
     """
-    Implements LanguageModelPort using Google Gemini streaming API.
+    Implements LanguageModelPort using Google Gemini streaming API (google-genai SDK).
 
-    Token streaming is emulated by iterating the response chunks.
-    For PoC: uses gemini-1.5-flash (free tier, low latency).
+    Uses gemini-2.0-flash for low latency on the free tier.
+    Streaming via generate_content_stream runs in a thread pool to avoid
+    blocking the async event loop.
     """
 
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash") -> None:
-        genai.configure(api_key=api_key)
-        self._model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=_SYSTEM_PROMPT,
-        )
+    def __init__(self, api_key: str, model_name: str = _DEFAULT_MODEL) -> None:
+        self._client = genai.Client(api_key=api_key)
+        self._model_name = model_name
 
     async def generate(
         self, stream_id: str, utterance: Utterance, context: list[str]
     ) -> AsyncIterator[str]:
-        # Build conversation history from context
-        history = []
+        # Build conversation history from prior turns
+        contents = []
         for i, turn in enumerate(context):
             role = "user" if i % 2 == 0 else "model"
-            history.append({"role": role, "parts": [turn]})
+            contents.append(types.Content(role=role, parts=[types.Part(text=turn)]))
 
-        # Run blocking SDK call in thread pool to avoid blocking event loop
+        # Add current user utterance
+        contents.append(
+            types.Content(role="user", parts=[types.Part(text=utterance.text)])
+        )
+
+        config = types.GenerateContentConfig(system_instruction=_SYSTEM_PROMPT)
+
+        # Run blocking stream in thread pool so we don't block the event loop
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        stream = await loop.run_in_executor(
             None,
-            lambda: self._model.generate_content(
-                history + [{"role": "user", "parts": [utterance.text]}],
-                stream=True,
+            lambda: self._client.models.generate_content_stream(
+                model=self._model_name,
+                contents=contents,
+                config=config,
             ),
         )
 
-        for chunk in response:
-            if chunk.text:
-                yield chunk.text
+        for chunk in stream:
+            text = chunk.text
+            if text:
+                yield text
+

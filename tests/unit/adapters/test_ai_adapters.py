@@ -22,19 +22,23 @@ def test_gemini_adapter_with_fake_client() -> None:
     from src.adapters.gemini_llm_adapter import GeminiLLMAdapter
     from src.domain.entities.utterance import Utterance
 
-    # Fake the Gemini model to avoid real API call
+    # Fake the new google-genai SDK client
     class FakeChunk:
         def __init__(self, text): self.text = text
 
-    class FakeResponse:
+    class FakeStream:
         def __iter__(self):
             return iter([FakeChunk("Hello "), FakeChunk("there!"), FakeChunk("")])
 
-    class FakeModel:
-        def generate_content(self, *args, **kwargs): return FakeResponse()
+    class FakeModels:
+        def generate_content_stream(self, *args, **kwargs): return FakeStream()
+
+    class FakeClient:
+        models = FakeModels()
 
     adapter = GeminiLLMAdapter.__new__(GeminiLLMAdapter)
-    adapter._model = FakeModel()
+    adapter._client = FakeClient()
+    adapter._model_name = "gemini-2.0-flash"
 
     utt = Utterance("How are you?", 0.95, True, datetime.now(timezone.utc))
 

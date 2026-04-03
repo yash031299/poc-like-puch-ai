@@ -99,6 +99,13 @@ class ExotelWebSocketHandler:
                     digit = message.get("dtmf", {}).get("digit", "")
                     logger.debug("DTMF digit=%s stream=%s", digit, stream_id)
 
+                elif event == "clear":
+                    # Exotel sends 'clear' when caller says "start over".
+                    # Bot must reset its conversation context.
+                    logger.info("Exotel clear received — resetting session context stream=%s", stream_id)
+                    if stream_id:
+                        await self._handle_clear(stream_id)
+
         except Exception as exc:
             logger.error("WebSocket handler error: %s", exc, exc_info=True)
         finally:
@@ -195,4 +202,15 @@ class ExotelWebSocketHandler:
             logger.info("Call ended: stream=%s", stream_id)
         except ValueError as exc:
             logger.warning("EndCall failed: %s", exc)
+
+    async def _handle_clear(self, stream_id: str) -> None:
+        """
+        Handle inbound 'clear' from Exotel — reset conversation context.
+
+        Per Exotel docs: Exotel sends clear when caller says 'start over'.
+        The bot must flush session memory and re-establish a clean state.
+        For PoC: we log the reset; full context clearing can be added in Phase 4.
+        """
+        logger.info("Session context reset requested stream=%s", stream_id)
+        # TODO Phase 4: call a ResetSessionUseCase that clears utterances/ai_responses
 

@@ -4,15 +4,10 @@ import asyncio
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
-from google.cloud import texttospeech
-
 from src.domain.entities.ai_response import AIResponse
 from src.domain.entities.speech_segment import SpeechSegment
 from src.domain.value_objects.audio_format import AudioFormat
 from src.ports.text_to_speech_port import TextToSpeechPort
-
-# Exotel streams expect PCM16LE — LINEAR16 in Google nomenclature
-_AUDIO_ENCODING = texttospeech.AudioEncoding.LINEAR16
 
 # Segment size: 3200 bytes = 100ms at 16kHz PCM16LE (multiple of 320 bytes)
 _CHUNK_BYTES = 3200
@@ -21,6 +16,9 @@ _CHUNK_BYTES = 3200
 class GoogleTTSAdapter(TextToSpeechPort):
     """
     Implements TextToSpeechPort using Google Cloud Text-to-Speech.
+
+    Client is lazily initialized on first use so the server starts even
+    when GOOGLE_APPLICATION_CREDENTIALS is not set (fails at first real call).
 
     Synthesizes full audio then chunks it into SpeechSegments of
     _CHUNK_BYTES each, matching Exotel's expected multiples-of-320 bytes.
@@ -32,13 +30,19 @@ class GoogleTTSAdapter(TextToSpeechPort):
         voice_name: str = "en-US-Neural2-F",
         sample_rate: int = 16000,
     ) -> None:
-        self._client = texttospeech.TextToSpeechClient()
         self._language_code = language_code
         self._voice_name = voice_name
         self._sample_rate = sample_rate
         self._audio_format = AudioFormat(
             sample_rate=sample_rate, encoding="PCM16LE", channels=1
         )
+        self._client = None  # lazy init
+
+    def _get_client(self):
+        if self._client is None:
+            from google.cloud import texttospeech
+            self._client = texttospeech.TextToSpeechClient()
+        return self._client
 
     async def synthesize(
         self, stream_id: str, response: AIResponse
@@ -46,23 +50,24 @@ class GoogleTTSAdapter(TextToSpeechPort):
         loop = asyncio.get_event_loop()
         audio_bytes = await loop.run_in_executor(None, self._synthesize_sync, response.text)
 
-        # Chunk audio into multiples of 320 bytes
-        segments = self._chunk_audio(response.response_id, audio_bytes)
-        for segment in segments:
+        for segment in self._chunk_audio(response.response_id, audio_bytes):
             yield segment
 
     def _synthesize_sync(self, text: str) -> bytes:
         """Synchronous Google TTS call (runs in thread pool)."""
+        from google.cloud import texttospeech
+        client = self._get_client()
+
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
             language_code=self._language_code,
             name=self._voice_name,
         )
         audio_config = texttospeech.AudioConfig(
-            audio_encoding=_AUDIO_ENCODING,
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
             sample_rate_hertz=self._sample_rate,
         )
-        response = self._client.synthesize_speech(
+        response = client.synthesize_speech(
             input=synthesis_input, voice=voice, audio_config=audio_config
         )
         return response.audio_content
@@ -74,7 +79,6 @@ class GoogleTTSAdapter(TextToSpeechPort):
         Business Rule: Chunks must be multiples of 320 bytes.
         Pad the final chunk with silence (zero bytes) if needed.
         """
-        # Ensure total length is multiple of 320
         remainder = len(audio_bytes) % 320
         if remainder:
             audio_bytes += b"\x00" * (320 - remainder)
@@ -86,7 +90,6 @@ class GoogleTTSAdapter(TextToSpeechPort):
 
         while offset < total:
             chunk = audio_bytes[offset : offset + _CHUNK_BYTES]
-            # Pad last chunk if needed
             if len(chunk) < _CHUNK_BYTES:
                 chunk = chunk + b"\x00" * (_CHUNK_BYTES - len(chunk))
 
@@ -104,17 +107,16 @@ class GoogleTTSAdapter(TextToSpeechPort):
             position += 1
             offset += _CHUNK_BYTES
 
-        # Ensure last segment has is_last=True
-        if segments:
+        if segments and not segments[-1].is_last:
             last = segments[-1]
-            if not last.is_last:
-                segments[-1] = SpeechSegment(
-                    response_id=last.response_id,
-                    position=last.position,
-                    audio_data=last.audio_data,
-                    audio_format=last.audio_format,
-                    is_last=True,
-                    timestamp=last.timestamp,
-                )
+            segments[-1] = SpeechSegment(
+                response_id=last.response_id,
+                position=last.position,
+                audio_data=last.audio_data,
+                audio_format=last.audio_format,
+                is_last=True,
+                timestamp=last.timestamp,
+            )
 
         return segments
+

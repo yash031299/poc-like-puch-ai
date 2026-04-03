@@ -19,7 +19,10 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file before anything reads os.environ
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from src.adapters.gemini_llm_adapter import GeminiLLMAdapter
@@ -53,7 +56,7 @@ async def lifespan(app: FastAPI):
     global _session_repo, _ws_handler
 
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    sample_rate = int(os.environ.get("SAMPLE_RATE", "16000"))
+    sample_rate = int(os.environ.get("SAMPLE_RATE", "8000"))  # Exotel default is 8000 Hz
     language_code = os.environ.get("LANGUAGE_CODE", "en-US")
     tts_voice = os.environ.get("TTS_VOICE", "en-US-Neural2-F")
 
@@ -120,6 +123,42 @@ async def health() -> JSONResponse:
     """Health check endpoint for load balancers and smoke tests."""
     active = len(_session_repo) if "_session_repo" in globals() else 0
     return JSONResponse({"status": "ok", "active_sessions": active})
+
+
+@app.get("/passthru")
+async def passthru(request: Request) -> JSONResponse:
+    """
+    Exotel Passthru Applet endpoint.
+
+    Exotel calls this HTTP GET after the VoiceBot stream ends, passing:
+      Stream[StreamSID], Stream[Status], Stream[Duration],
+      Stream[RecordingUrl], Stream[DisconnectedBy], Stream[Error]
+
+    Place the Passthru Applet immediately after the VoiceBot Applet in
+    your Exotel flow and point it to: https://<your-host>/passthru
+
+    Returns 200 to allow Exotel to proceed to the next applet.
+    """
+    params = dict(request.query_params)
+    stream_sid = params.get("Stream[StreamSID]", params.get("StreamSID", "unknown"))
+    status = params.get("Stream[Status]", params.get("Status", "unknown"))
+    duration = params.get("Stream[Duration]", params.get("Duration", "0"))
+    disconnected_by = params.get("Stream[DisconnectedBy]", params.get("DisconnectedBy", "NA"))
+    recording_url = params.get("Stream[RecordingUrl]", params.get("RecordingUrl", ""))
+    error = params.get("Stream[Error]", params.get("Error", ""))
+
+    if error:
+        logger.error(
+            "Stream ended with error: stream=%s status=%s error=%s disconnected_by=%s",
+            stream_sid, status, error, disconnected_by,
+        )
+    else:
+        logger.info(
+            "Stream completed: stream=%s status=%s duration=%ss disconnected_by=%s recording=%s",
+            stream_sid, status, duration, disconnected_by, recording_url or "none",
+        )
+
+    return JSONResponse({"status": "ok"})
 
 
 @app.websocket("/stream")

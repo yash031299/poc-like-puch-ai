@@ -331,3 +331,92 @@ def test_handler_survives_inbound_mark_event() -> None:
     )
 
     asyncio.run(handler.handle(ws))
+
+
+def _clear_msg(stream_id="stream-test"):
+    return json.dumps({
+        "event": "clear",
+        "stream_sid": stream_id,
+    })
+
+
+def _start_msg_with_sample_rate(stream_id="stream-sr", sample_rate=16000):
+    return json.dumps({
+        "event": "start",
+        "sequence_number": "1",
+        "start": {
+            "stream_sid": stream_id,
+            "from": "+1111111111",
+            "to": "+2222222222",
+            "custom_parameters": {},
+            "media_format": {
+                "encoding": "base64",
+                "sample_rate": str(sample_rate),
+                "bit_rate": "128kbps"
+            }
+        }
+    })
+
+
+def test_handler_survives_inbound_clear_event() -> None:
+    """Exotel sends 'clear' when caller says start over — must not crash."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-clr")
+    ws = FakeWebSocket([
+        _start_msg("stream-clr"),
+        _clear_msg("stream-clr"),
+        _stop_msg("stream-clr"),
+    ])
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+    )
+
+    asyncio.run(handler.handle(ws))
+    # No assertion needed — test passes if no exception raised
+
+
+def test_handler_reads_sample_rate_from_start_media_format() -> None:
+    """Sample rate from start.media_format.sample_rate must override the default."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-sr")
+    audio_b64 = base64.b64encode(bytes(3200)).decode()
+    ws = FakeWebSocket([
+        _start_msg_with_sample_rate("stream-sr", 16000),
+        _media_msg(1, audio_b64, "stream-sr"),
+        _stop_msg("stream-sr"),
+    ])
+    process_uc = FakeProcessAudio()
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=process_uc,
+        end_call=FakeEndCall(),
+        sample_rate=8000,  # default 8000; should be overridden to 16000 from start message
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert process_uc.chunks_received[0].audio_format.sample_rate == 16000
+
+
+def test_handler_closes_websocket_on_stop() -> None:
+    """WebSocket must be closed after stop event so Exotel moves to next applet."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-close")
+    ws = FakeWebSocket([_start_msg("stream-close"), _stop_msg("stream-close")])
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert ws.closed is True
