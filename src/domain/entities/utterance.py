@@ -12,7 +12,9 @@ class Utterance:
     Partial utterances can be updated as more speech is received.
     Final utterances are immutable.
     """
-    
+
+    __slots__ = ("_utterance_id", "_text", "_confidence", "_is_final", "_timestamp")
+
     def __init__(
         self,
         text: str,

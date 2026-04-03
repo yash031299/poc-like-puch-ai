@@ -14,6 +14,8 @@ class SpeechSegment:
     segments within the same response; is_last marks the final segment.
     """
 
+    __slots__ = ("_response_id", "_position", "_audio_data", "_audio_format", "_is_last", "_timestamp")
+
     def __init__(
         self,
         response_id: str,

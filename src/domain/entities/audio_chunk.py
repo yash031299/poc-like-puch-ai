@@ -14,7 +14,9 @@ class AudioChunk:
     to ensure accurate transcription. Each chunk has a sequence number
     for ordering and contains raw audio samples.
     """
-    
+
+    __slots__ = ("_sequence_number", "_timestamp", "_audio_format", "_audio_data")
+
     def __init__(
         self,
         sequence_number: int,

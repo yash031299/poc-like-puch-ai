@@ -22,6 +22,10 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file before anything reads os.environ
 
+# Configure structured logging as early as possible (before any module-level loggers fire)
+from src.infrastructure.logging_config import configure_logging, log_context  # noqa: E402
+configure_logging()
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
@@ -38,12 +42,6 @@ from src.use_cases.process_audio import ProcessAudioUseCase
 from src.use_cases.reset_session import ResetSessionUseCase
 from src.use_cases.stream_response import StreamResponseUseCase
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 # ── Shared singletons (created once at startup) ───────────────────────────────
@@ -179,12 +177,15 @@ async def websocket_stream(websocket: WebSocket) -> None:
     if qs_rate and qs_rate.isdigit():
         _ws_handler._sample_rate = int(qs_rate)
 
-    try:
-        await _ws_handler.handle(websocket)
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected cleanly (Exotel closed connection)")
-    except Exception as exc:
-        logger.error("Unexpected WebSocket error: %s", exc, exc_info=True)
+    # Correlation: client IP for early logging before stream_id is known
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    with log_context(client_ip=client_ip):
+        try:
+            await _ws_handler.handle(websocket)
+        except WebSocketDisconnect:
+            logger.info("WebSocket disconnected cleanly (Exotel closed connection)")
+        except Exception as exc:
+            logger.error("Unexpected WebSocket error: %s", exc, exc_info=True)
 
 
 @app.exception_handler(Exception)
@@ -197,11 +198,21 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 if __name__ == "__main__":
     import uvicorn
 
+    # Use uvloop for ~4x faster async I/O on Linux/macOS (ignored silently if unavailable)
+    try:
+        import uvloop  # type: ignore
+        uvloop.install()
+        logger.info("uvloop event loop installed")
+    except ImportError:
+        pass  # Falls back to default asyncio event loop
+
     port = int(os.environ.get("PORT", "8000"))
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
     uvicorn.run(
         "src.infrastructure.server:app",
         host="0.0.0.0",
         port=port,
-        log_level=log_level.lower(),
+        log_level=log_level_str.lower(),
+        loop="uvloop",  # uvicorn will fall back to asyncio if unavailable
         reload=os.environ.get("RELOAD", "false").lower() == "true",
     )
