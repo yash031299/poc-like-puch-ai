@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from src.domain.entities.call_session import CallSession
 from src.domain.entities.audio_chunk import AudioChunk
+from src.domain.entities.utterance import Utterance
 from src.domain.value_objects.stream_identifier import StreamIdentifier
 from src.domain.value_objects.audio_format import AudioFormat
 
@@ -27,6 +28,7 @@ class ConversationSession:
         self._call_session = call_session
         self._audio_chunks: List[AudioChunk] = []
         self._buffered_chunks: Dict[int, AudioChunk] = {}  # sequence -> chunk
+        self._utterances: List[Utterance] = []
     
     @classmethod
     def create(
@@ -83,6 +85,21 @@ class ConversationSession:
     def buffered_chunks(self) -> List[AudioChunk]:
         """Get list of buffered out-of-order chunks."""
         return list(self._buffered_chunks.values())
+    
+    @property
+    def utterances(self) -> List[Utterance]:
+        """Get the list of utterances (transcribed speech)."""
+        return list(self._utterances)  # Return copy for immutability
+    
+    @property
+    def latest_utterance(self) -> Optional[Utterance]:
+        """Get the most recent utterance, or None if no utterances exist."""
+        return self._utterances[-1] if self._utterances else None
+    
+    @property
+    def final_utterances(self) -> List[Utterance]:
+        """Get only the final (completed) utterances."""
+        return [u for u in self._utterances if u.is_final]
     
     def activate(self) -> None:
         """
@@ -168,6 +185,18 @@ class ConversationSession:
             if chunk.sequence_number == sequence_number:
                 return chunk
         return None
+    
+    def add_utterance(self, utterance: Utterance) -> None:
+        """
+        Add an utterance (transcribed speech) to the conversation.
+        
+        Business Rule: Utterances represent transcribed caller speech.
+        They can be partial (in-progress) or final (completed).
+        
+        Args:
+            utterance: The utterance to add
+        """
+        self._utterances.append(utterance)
     
     def __eq__(self, other: object) -> bool:
         """
