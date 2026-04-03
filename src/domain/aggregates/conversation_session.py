@@ -1,8 +1,9 @@
 """ConversationSession aggregate - root aggregate for managing call lifecycle."""
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from src.domain.entities.call_session import CallSession
+from src.domain.entities.audio_chunk import AudioChunk
 from src.domain.value_objects.stream_identifier import StreamIdentifier
 from src.domain.value_objects.audio_format import AudioFormat
 
@@ -24,6 +25,8 @@ class ConversationSession:
             call_session: The CallSession entity (aggregate root)
         """
         self._call_session = call_session
+        self._audio_chunks: List[AudioChunk] = []
+        self._buffered_chunks: Dict[int, AudioChunk] = {}  # sequence -> chunk
     
     @classmethod
     def create(
@@ -71,6 +74,16 @@ class ConversationSession:
         """Check if the conversation has ended."""
         return self._call_session.state == "ended"
     
+    @property
+    def audio_chunks(self) -> List[AudioChunk]:
+        """Get the ordered list of audio chunks received."""
+        return list(self._audio_chunks)  # Return copy for immutability
+    
+    @property
+    def buffered_chunks(self) -> List[AudioChunk]:
+        """Get list of buffered out-of-order chunks."""
+        return list(self._buffered_chunks.values())
+    
     def activate(self) -> None:
         """
         Activate the conversation (first audio received).
@@ -87,6 +100,74 @@ class ConversationSession:
         further modifications.
         """
         self._call_session.end()
+    
+    def add_audio_chunk(self, chunk: AudioChunk) -> None:
+        """
+        Add an audio chunk to the conversation.
+        
+        Business Rule: Chunks must be processed in sequence order.
+        Out-of-order chunks are buffered until gaps are filled.
+        
+        Args:
+            chunk: The audio chunk to add
+            
+        Raises:
+            ValueError: If chunk format mismatches or is duplicate
+        """
+        # Validate audio format matches call format
+        if chunk.audio_format != self._call_session.audio_format:
+            raise ValueError("Audio format mismatch")
+        
+        # Check for duplicate
+        if any(c.sequence_number == chunk.sequence_number for c in self._audio_chunks):
+            raise ValueError(f"Audio chunk with sequence {chunk.sequence_number} already exists")
+        
+        if chunk.sequence_number in self._buffered_chunks:
+            raise ValueError(f"Audio chunk with sequence {chunk.sequence_number} already exists")
+        
+        # Determine expected next sequence number
+        expected_seq = len(self._audio_chunks) + 1
+        
+        if chunk.sequence_number == expected_seq:
+            # In order - add to main list
+            self._audio_chunks.append(chunk)
+            
+            # Process any buffered chunks that are now in sequence
+            self._flush_buffered_chunks()
+        elif chunk.sequence_number > expected_seq:
+            # Out of order - buffer it
+            self._buffered_chunks[chunk.sequence_number] = chunk
+        else:
+            # Chunk is from the past (already processed) - reject
+            raise ValueError(f"Audio chunk with sequence {chunk.sequence_number} already processed")
+    
+    def _flush_buffered_chunks(self) -> None:
+        """
+        Add any buffered chunks that are now in sequence.
+        
+        Business Rule: Process buffered chunks in order when gaps are filled.
+        """
+        expected_seq = len(self._audio_chunks) + 1
+        
+        while expected_seq in self._buffered_chunks:
+            chunk = self._buffered_chunks.pop(expected_seq)
+            self._audio_chunks.append(chunk)
+            expected_seq += 1
+    
+    def get_audio_chunk(self, sequence_number: int) -> Optional[AudioChunk]:
+        """
+        Retrieve an audio chunk by sequence number.
+        
+        Args:
+            sequence_number: The sequence number to retrieve
+            
+        Returns:
+            The audio chunk, or None if not found
+        """
+        for chunk in self._audio_chunks:
+            if chunk.sequence_number == sequence_number:
+                return chunk
+        return None
     
     def __eq__(self, other: object) -> bool:
         """
