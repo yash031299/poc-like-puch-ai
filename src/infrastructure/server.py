@@ -61,6 +61,9 @@ async def lifespan(app: FastAPI):
         logger.warning("GEMINI_API_KEY not set — LLM responses will fail")
 
     # ── Adapters ───────────────────────────────────────────────────────────────
+    # STT/TTS providers are interchangeable — swap the adapter classes here
+    # to use Deepgram, Whisper, ElevenLabs, etc. without touching use cases.
+    # Future: read STT_PROVIDER / TTS_PROVIDER env vars to select at runtime.
     _session_repo = InMemorySessionRepository()
 
     llm = GeminiLLMAdapter(api_key=gemini_key)
@@ -95,6 +98,7 @@ async def lifespan(app: FastAPI):
         process_audio=process_uc,
         end_call=end_uc,
         sample_rate=sample_rate,
+        audio_adapter=audio_out,
     )
 
     logger.info("✅ Puch AI Voice Server ready (sample_rate=%dHz)", sample_rate)

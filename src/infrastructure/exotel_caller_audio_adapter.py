@@ -60,3 +60,44 @@ class ExotelCallerAudioAdapter(CallerAudioPort):
             await websocket.send_text(message)
         except Exception as exc:
             logger.error("Failed to send audio to stream %s: %s", stream_id, exc)
+
+    async def send_mark(self, stream_id: str, label: str) -> None:
+        """
+        Send a 'mark' event to Exotel.
+
+        Exotel will echo this mark back when playback reaches this point,
+        allowing us to track which audio segments have been played.
+        """
+        websocket = self._connections.get(stream_id)
+        if websocket is None:
+            return
+
+        message = json.dumps({
+            "event": "mark",
+            "stream_sid": stream_id,
+            "mark": {"name": label},
+        })
+        try:
+            await websocket.send_text(message)
+        except Exception as exc:
+            logger.error("Failed to send mark to stream %s: %s", stream_id, exc)
+
+    async def send_clear(self, stream_id: str) -> None:
+        """
+        Send a 'clear' event to Exotel to flush buffered audio.
+
+        Use this for barge-in: when caller speaks, clear the AI's pending
+        audio so the response doesn't continue playing over the caller.
+        """
+        websocket = self._connections.get(stream_id)
+        if websocket is None:
+            return
+
+        message = json.dumps({
+            "event": "clear",
+            "stream_sid": stream_id,
+        })
+        try:
+            await websocket.send_text(message)
+        except Exception as exc:
+            logger.error("Failed to send clear to stream %s: %s", stream_id, exc)

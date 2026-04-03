@@ -15,12 +15,6 @@ from src.use_cases.process_audio import ProcessAudioUseCase
 
 logger = logging.getLogger(__name__)
 
-# Default audio format for Exotel (overridden by start message if provided)
-_DEFAULT_AUDIO_FORMAT = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
-
-# Sample rate map from Exotel query params
-_SAMPLE_RATE_MAP = {8000: 8000, 16000: 16000, 24000: 24000}
-
 
 class ExotelWebSocketHandler:
     """
@@ -28,8 +22,9 @@ class ExotelWebSocketHandler:
 
     Responsibilities:
     - Accept WebSocket connection
-    - Parse Exotel JSON events (start / media / stop / dtmf)
-    - Decode base64 audio payloads
+    - Parse Exotel JSON events: connected / start / media / mark / stop / dtmf
+    - Register the WebSocket with the audio adapter so TTS audio can be sent back
+    - Decode base64 audio payloads, preserving Exotel's chunk sequence numbers
     - Delegate to use cases (AcceptCall, ProcessAudio, EndCall)
 
     This class is intentionally thin: all business logic lives in use cases.
@@ -41,30 +36,30 @@ class ExotelWebSocketHandler:
         process_audio: ProcessAudioUseCase,
         end_call: EndCallUseCase,
         sample_rate: int = 16000,
+        audio_adapter=None,  # ExotelCallerAudioAdapter — optional for backward compat
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
         self._end_call = end_call
         self._sample_rate = sample_rate
+        self._audio_adapter = audio_adapter
 
     async def handle(self, websocket: Any) -> None:
         """
         Main WebSocket handler coroutine.
 
-        Accepts the connection then reads messages in a loop until
-        the connection closes or a 'stop' event is received.
+        Exotel AgentStream event sequence:
+          connected → start → media* → (mark*) → stop
         """
         await websocket.accept()
 
         stream_id: Optional[str] = None
-        seq: int = 0
 
         try:
             while True:
                 try:
                     raw = await websocket.receive_text()
                 except Exception:
-                    # Connection closed by remote
                     break
 
                 try:
@@ -76,24 +71,39 @@ class ExotelWebSocketHandler:
                 event = message.get("event")
                 logger.debug("Exotel event: %s stream=%s", event, stream_id)
 
-                if event == "start":
+                if event == "connected":
+                    # Exotel sends this immediately on connection before 'start'
+                    logger.info("Exotel connection established")
+
+                elif event == "start":
                     stream_id = await self._handle_start(message)
+                    if stream_id and self._audio_adapter:
+                        self._audio_adapter.register(stream_id, websocket)
 
                 elif event == "media" and stream_id:
-                    seq += 1
-                    await self._handle_media(message, stream_id, seq)
+                    await self._handle_media(message, stream_id)
+
+                elif event == "mark":
+                    # Exotel confirms audio playback reached a named mark point
+                    mark_name = message.get("mark", {}).get("name", "")
+                    logger.debug("Mark confirmed by Exotel: %s stream=%s", mark_name, stream_id)
 
                 elif event == "stop":
                     if stream_id:
+                        if self._audio_adapter:
+                            self._audio_adapter.unregister(stream_id)
                         await self._handle_stop(stream_id)
                     break
 
                 elif event == "dtmf":
-                    logger.debug("DTMF received (not handled yet)")
+                    digit = message.get("dtmf", {}).get("digit", "")
+                    logger.debug("DTMF digit=%s stream=%s", digit, stream_id)
 
         except Exception as exc:
             logger.error("WebSocket handler error: %s", exc, exc_info=True)
         finally:
+            if stream_id and self._audio_adapter:
+                self._audio_adapter.unregister(stream_id)
             try:
                 await websocket.close()
             except Exception:
@@ -102,14 +112,22 @@ class ExotelWebSocketHandler:
     # ── Event handlers ────────────────────────────────────────────────────────
 
     async def _handle_start(self, message: Dict[str, Any]) -> str:
-        """Process 'start' event: create session via use case."""
+        """Process 'start' event: extract call metadata and create session."""
         start_data = message.get("start", {})
-        stream_id = start_data.get("stream_sid", message.get("stream_sid", "unknown"))
+        # stream_sid is in start.stream_sid AND at top-level
+        stream_id = start_data.get("stream_sid") or message.get("stream_sid", "unknown")
         caller = start_data.get("from", "unknown")
         called = start_data.get("to", "unknown")
         custom_params = start_data.get("custom_parameters", {}) or {}
 
-        # Determine audio format (Exotel provides sample rate in path params)
+        # Honor sample rate from start.media_format if Exotel provides it
+        media_format = start_data.get("media_format", {})
+        if media_format.get("sample_rate"):
+            try:
+                self._sample_rate = int(media_format["sample_rate"])
+            except (ValueError, TypeError):
+                pass
+
         audio_format = AudioFormat(
             sample_rate=self._sample_rate,
             encoding="PCM16LE",
@@ -130,10 +148,8 @@ class ExotelWebSocketHandler:
 
         return stream_id
 
-    async def _handle_media(
-        self, message: Dict[str, Any], stream_id: str, seq: int
-    ) -> None:
-        """Process 'media' event: decode audio and pass to ProcessAudio use case."""
+    async def _handle_media(self, message: Dict[str, Any], stream_id: str) -> None:
+        """Process 'media' event using Exotel's chunk number for ordering."""
         media = message.get("media", {})
         payload_b64 = media.get("payload", "")
 
@@ -149,13 +165,19 @@ class ExotelWebSocketHandler:
         if not audio_data:
             return
 
+        # Use Exotel's chunk counter for correct sequence ordering
+        try:
+            chunk_seq = int(media.get("chunk", 0))
+        except (ValueError, TypeError):
+            chunk_seq = 0
+
         audio_format = AudioFormat(
             sample_rate=self._sample_rate,
             encoding="PCM16LE",
             channels=1,
         )
         chunk = AudioChunk(
-            sequence_number=seq,
+            sequence_number=chunk_seq,
             timestamp=datetime.now(timezone.utc),
             audio_format=audio_format,
             audio_data=audio_data,
@@ -173,3 +195,4 @@ class ExotelWebSocketHandler:
             logger.info("Call ended: stream=%s", stream_id)
         except ValueError as exc:
             logger.warning("EndCall failed: %s", exc)
+

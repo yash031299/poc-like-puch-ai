@@ -60,6 +60,20 @@ class FakeEndCall:
         self.ended.append(stream_id)
 
 
+class FakeCallerAudioAdapter:
+    """Tracks register/unregister calls and captured sent audio."""
+
+    def __init__(self):
+        self.registered: dict = {}   # stream_id -> websocket
+        self.unregistered: list = []
+
+    def register(self, stream_id: str, websocket) -> None:
+        self.registered[stream_id] = websocket
+
+    def unregister(self, stream_id: str) -> None:
+        self.unregistered.append(stream_id)
+
+
 def _make_session(stream_id="stream-test"):
     from src.domain.aggregates.conversation_session import ConversationSession
     from src.domain.value_objects.stream_identifier import StreamIdentifier
@@ -109,6 +123,18 @@ def _stop_msg(stream_id="stream-test"):
         "sequence_number": "99",
         "stream_sid": stream_id,
         "stop": {"stream_sid": stream_id}
+    })
+
+
+def _connected_msg():
+    return json.dumps({"event": "connected"})
+
+
+def _mark_msg(stream_id="stream-test", label="tts-done"):
+    return json.dumps({
+        "event": "mark",
+        "stream_sid": stream_id,
+        "mark": {"name": label},
     })
 
 
@@ -199,3 +225,109 @@ def test_handler_calls_end_call_on_stop_event() -> None:
     asyncio.run(handler.handle(ws))
 
     assert "stream-e" in end_uc.ended
+
+
+def test_handler_registers_websocket_with_audio_adapter_on_start() -> None:
+    """Critical: audio_adapter.register must be called so TTS audio can reach caller."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-reg")
+    ws = FakeWebSocket([_start_msg("stream-reg"), _stop_msg("stream-reg")])
+    audio_adapter = FakeCallerAudioAdapter()
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+        audio_adapter=audio_adapter,
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert "stream-reg" in audio_adapter.registered
+    assert audio_adapter.registered["stream-reg"] is ws
+
+
+def test_handler_unregisters_websocket_with_audio_adapter_on_stop() -> None:
+    """Audio adapter must clean up on call end to avoid memory leaks."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-unreg")
+    ws = FakeWebSocket([_start_msg("stream-unreg"), _stop_msg("stream-unreg")])
+    audio_adapter = FakeCallerAudioAdapter()
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+        audio_adapter=audio_adapter,
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert "stream-unreg" in audio_adapter.unregistered
+
+
+def test_handler_survives_connected_event_before_start() -> None:
+    """Exotel sends 'connected' before 'start' — must not crash."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-conn")
+    ws = FakeWebSocket([
+        _connected_msg(),
+        _start_msg("stream-conn"),
+        _stop_msg("stream-conn"),
+    ])
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+    )
+
+    asyncio.run(handler.handle(ws))
+    # No assertion needed — test passes if no exception raised
+
+
+def test_handler_uses_exotel_chunk_number_for_sequence() -> None:
+    """AudioChunk.sequence_number must come from media.chunk (Exotel's counter), not our own."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-seq")
+    audio_b64 = base64.b64encode(bytes(3200)).decode()
+    ws = FakeWebSocket([
+        _start_msg("stream-seq"),
+        _media_msg(42, audio_b64, "stream-seq"),   # Exotel chunk number = 42
+        _stop_msg("stream-seq"),
+    ])
+    process_uc = FakeProcessAudio()
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=process_uc,
+        end_call=FakeEndCall(),
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert process_uc.chunks_received[0].sequence_number == 42
+
+
+def test_handler_survives_inbound_mark_event() -> None:
+    """Exotel sends 'mark' to confirm playback — must not crash."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-mark")
+    ws = FakeWebSocket([
+        _start_msg("stream-mark"),
+        _mark_msg("stream-mark", "segment-1"),
+        _stop_msg("stream-mark"),
+    ])
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+    )
+
+    asyncio.run(handler.handle(ws))
