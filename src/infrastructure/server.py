@@ -35,6 +35,7 @@ from src.use_cases.accept_call import AcceptCallUseCase
 from src.use_cases.end_call import EndCallUseCase
 from src.use_cases.generate_response import GenerateResponseUseCase
 from src.use_cases.process_audio import ProcessAudioUseCase
+from src.use_cases.reset_session import ResetSessionUseCase
 from src.use_cases.stream_response import StreamResponseUseCase
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -82,7 +83,7 @@ async def lifespan(app: FastAPI):
 
     # ── Use cases ──────────────────────────────────────────────────────────────
     accept_uc = AcceptCallUseCase(session_repo=_session_repo)
-
+    reset_uc = ResetSessionUseCase(session_repo=_session_repo)
     generate_uc = GenerateResponseUseCase(session_repo=_session_repo, llm=llm)
     stream_uc = StreamResponseUseCase(
         session_repo=_session_repo, tts=tts, audio_out=audio_out
@@ -102,6 +103,7 @@ async def lifespan(app: FastAPI):
         end_call=end_uc,
         sample_rate=sample_rate,
         audio_adapter=audio_out,
+        reset_session=reset_uc,
     )
 
     logger.info("✅ Puch AI Voice Server ready (sample_rate=%dHz)", sample_rate)

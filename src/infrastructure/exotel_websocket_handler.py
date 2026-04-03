@@ -36,13 +36,15 @@ class ExotelWebSocketHandler:
         process_audio: ProcessAudioUseCase,
         end_call: EndCallUseCase,
         sample_rate: int = 16000,
-        audio_adapter=None,  # ExotelCallerAudioAdapter — optional for backward compat
+        audio_adapter=None,
+        reset_session=None,  # ResetSessionUseCase — handles inbound 'clear' from Exotel
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
         self._end_call = end_call
         self._sample_rate = sample_rate
         self._audio_adapter = audio_adapter
+        self._reset_session = reset_session
 
     async def handle(self, websocket: Any) -> None:
         """
@@ -208,9 +210,14 @@ class ExotelWebSocketHandler:
         Handle inbound 'clear' from Exotel — reset conversation context.
 
         Per Exotel docs: Exotel sends clear when caller says 'start over'.
-        The bot must flush session memory and re-establish a clean state.
-        For PoC: we log the reset; full context clearing can be added in Phase 4.
+        Wipes utterances, AI responses, and speech segments so the next
+        exchange starts fresh. Audio chunks and session state are preserved.
         """
         logger.info("Session context reset requested stream=%s", stream_id)
-        # TODO Phase 4: call a ResetSessionUseCase that clears utterances/ai_responses
+        if self._reset_session:
+            try:
+                await self._reset_session.execute(stream_id)
+                logger.info("Session context cleared stream=%s", stream_id)
+            except Exception as exc:
+                logger.error("ResetSession failed stream=%s: %s", stream_id, exc)
 

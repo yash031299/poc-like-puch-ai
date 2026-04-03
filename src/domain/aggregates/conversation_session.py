@@ -216,14 +216,30 @@ class ConversationSession:
     def add_utterance(self, utterance: Utterance) -> None:
         """
         Add an utterance (transcribed speech) to the conversation.
-        
+
         Business Rule: Utterances represent transcribed caller speech.
         They can be partial (in-progress) or final (completed).
-        
-        Args:
-            utterance: The utterance to add
         """
         self._utterances.append(utterance)
+
+    def reset_context(self) -> None:
+        """
+        Clear conversational context mid-call.
+
+        Business Rule: Triggered when Exotel sends a 'clear' event (caller
+        says 'start over'). Utterances and AI responses are wiped so the
+        next exchange starts fresh. Audio chunks are preserved as part of
+        the raw call record. Session state and caller info are unchanged.
+
+        Raises:
+            ValueError: If the session has already ended.
+        """
+        if self.is_ended:
+            raise ValueError("Cannot reset context of an ended conversation")
+        self._utterances.clear()
+        self._ai_responses.clear()
+        self._speech_segments.clear()
+        self._buffered_chunks.clear()
 
     # ── AIResponse ────────────────────────────────────────────────────────────
 
