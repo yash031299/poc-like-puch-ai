@@ -216,18 +216,98 @@ pytest tests/smoke/     # startup smoke tests
 
 ### Validation Snapshot
 
-- Full suite: **269 passed**
-- Coverage: **84%**
+- Full suite: **291 passed** (271 core + 20 protocol compliance tests)
+- Coverage: **85%**
+
+## Bidirectional Streaming Protocol Compliance
+
+This implementation supports **bidirectional streaming** per Exotel AgentStream protocol:
+- **Incoming:** Exotel sends caller's voice (media events) to the server
+- **Outgoing:** Server sends AI-generated voice (media events) back to caller
+- **Real-time:** WebSocket-based with millisecond-level latency
+
+### Protocol Features Implemented
+
+**Sequence Number Tracking**
+- Every outbound event (media, mark, clear) includes a monotonically increasing `sequence_number`
+- Sequence numbers start at 1 per stream and increment for proper packet ordering
+- Per-stream tracking ensures correct ordering when handling concurrent calls
+
+**Timestamp Tracking**
+- Media events include `timestamp` field (milliseconds from stream start)
+- Timestamps enable Exotel to synchronize audio playback with other call events
+- Calculated at send time to ensure accuracy
+
+**Chunk Size Validation**
+- All audio chunks are validated to be multiples of 320 bytes per Exotel spec
+- Invalid chunk sizes cause assertion errors to catch bugs early
+- Prevents 20ms audio gaps that would occur with invalid chunk sizes
+
+**Event Types**
+- **media:** Audio data (PCM16LE, base64-encoded)
+  - Includes: `sequence_number`, `stream_sid`, `payload`, `timestamp`
+- **mark:** Playback progress tracking
+  - Includes: `sequence_number`, `stream_sid`, `name` (label)
+- **clear:** Buffer flush for barge-in scenarios
+  - Includes: `sequence_number`, `stream_sid`
+
+### Example: Sequence & Timestamp in Media Event
+
+```json
+{
+  "event": "media",
+  "sequence_number": 1,
+  "stream_sid": "stream-123",
+  "media": {
+    "payload": "//NExAA...",  // base64 PCM16LE
+    "timestamp": "100"        // milliseconds from start
+  }
+}
+```
+
+### Sample Rates
+
+Exotel supports configurable sample rates via query parameter:
+- `8 kHz` (default, PSTN quality): `wss://your-domain.com/?sample-rate=8000`
+- `16 kHz` (recommended, balanced): `wss://your-domain.com/?sample-rate=16000`
+- `24 kHz` (HD quality): `wss://your-domain.com/?sample-rate=24000`
+
+### Authentication
+
+Two authentication methods are supported:
+1. **IP Whitelisting** (preferred for PoC)
+   - Request Exotel IP ranges at hello@exotel.com
+   - No credentials in WebSocket URL
+
+2. **Basic Authentication**
+   - Include API_KEY and API_TOKEN in WebSocket URL
+   - `wss://API_KEY:API_TOKEN@your-domain.com/stream`
+   - Exotel sends credentials securely in Authorization header
+
+### Clear Event (Barge-In)
+
+The `clear` event is used to implement intelligent barge-in:
+- When caller starts speaking mid-response, clear pending buffered audio
+- Prevents AI from continuing to speak over the caller
+- Effective with smaller chunk sizes (e.g., 3200 bytes = 100ms)
+
+Example flow:
+1. Server sends media chunks (chunk 1, chunk 2)
+2. Caller speaks ("stop")
+3. Server sends clear event → Exotel flushes buffered audio
+4. New STT/LLM/TTS cycle begins for new response
 
 ## Exotel Protocol Reference
 
-| Direction | Events |
-|-----------|--------|
-| Exotel → Server | `connected`, `start`, `media`, `dtmf`, `mark`, `stop`, `clear` |
-| Server → Exotel | `media` (audio), `mark` (playback tracking), `clear` (flush buffer) |
+| Direction | Events | Fields |
+|-----------|--------|--------|
+| Exotel → Server | `connected`, `start`, `media`, `dtmf`, `mark`, `stop`, `clear` | `event`, `sequence_number`, `stream_sid`, payload-specific |
+| Server → Exotel | `media` (audio), `mark` (playback tracking), `clear` (flush buffer) | `event`, `sequence_number`, `stream_sid`, payload-specific |
 
 **Audio format:** PCM 16-bit little-endian, mono, base64-encoded  
-**Chunk size:** multiples of 320 bytes; recommended 3200 bytes (100ms)  
+**Chunk size:** multiples of 320 bytes; recommended 3200 bytes (100ms at 16 kHz); validated before sending  
+**Sequence numbers:** Monotonically increasing per stream, starting at 1  
+**Timestamps:** Media events include milliseconds from stream start  
 **Timeout:** Exotel disconnects if server doesn't respond within 10 seconds
 
 ## References
