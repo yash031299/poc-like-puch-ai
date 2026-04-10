@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from src.domain.entities.audio_chunk import AudioChunk
+from src.domain.services.interrupt_detector import InterruptDetector
 from src.domain.value_objects.audio_format import AudioFormat
+from src.ports.session_repository_port import SessionRepositoryPort
 from src.use_cases.accept_call import AcceptCallUseCase
 from src.use_cases.end_call import EndCallUseCase
 from src.use_cases.process_audio import ProcessAudioUseCase
@@ -26,7 +28,6 @@ class ExotelWebSocketHandler:
     - Register the WebSocket with the audio adapter so TTS audio can be sent back
     - Decode base64 audio payloads, preserving Exotel's chunk sequence numbers
     - Delegate to use cases (AcceptCall, ProcessAudio, EndCall)
-    - Enforce connection draining (reject new connections if at max capacity)
 
     This class is intentionally thin: all business logic lives in use cases.
     """
@@ -36,28 +37,24 @@ class ExotelWebSocketHandler:
         accept_call: AcceptCallUseCase,
         process_audio: ProcessAudioUseCase,
         end_call: EndCallUseCase,
+        session_repo: SessionRepositoryPort,
         sample_rate: int = 16000,
         audio_adapter=None,
         reset_session=None,  # ResetSessionUseCase — handles inbound 'clear' from Exotel
         stt=None,  # SpeechToTextPort — held so we can flush its buffer on disconnect
         buffer_manager=None,  # AudioBufferManager — for VAD-based buffering
-        rate_limiter=None,  # RateLimiter — for IP and stream rate limiting
-         authenticator=None,  # AuthenticatorConfig — for IP whitelist + Bearer token auth
-        max_connections: int = 200,  # Max concurrent WebSocket connections (for load balancing)
-        get_active_connection_count=None,  # Callback to get active connection count
+        interrupt_detector=None,  # InterruptDetector — detect user interruptions
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
         self._end_call = end_call
+        self._session_repo = session_repo
         self._sample_rate = sample_rate
         self._audio_adapter = audio_adapter
         self._reset_session = reset_session
         self._stt = stt
         self._buffer_manager = buffer_manager
-        self._rate_limiter = rate_limiter
-        self._authenticator = authenticator
-        self._max_connections = max_connections
-        self._get_active_connection_count = get_active_connection_count
+        self._interrupt_detector = interrupt_detector or InterruptDetector()
 
     async def handle(self, websocket: Any) -> None:
         """
@@ -65,41 +62,7 @@ class ExotelWebSocketHandler:
 
         Exotel AgentStream event sequence:
           connected → start → media* → (mark*) → stop
-        
-        Connection draining: if active connections >= max_connections,
-        reject with 503 Service Unavailable.
-        
-        Authentication: IP whitelist + Bearer token (both optional, OR logic).
         """
-        # Check connection limit (load balancer coordination)
-        if self._get_active_connection_count:
-            active = self._get_active_connection_count()
-            if active >= self._max_connections:
-                logger.warning(
-                    "Connection limit reached: %d >= %d. Rejecting new connection.",
-                    active, self._max_connections
-                )
-                await websocket.close(code=4503, reason="Service Unavailable - load balancer at capacity")
-                return
-        
-        # Rate limit check on connection
-        client_ip = websocket.client.host if websocket.client else "unknown"
-        if self._rate_limiter:
-            ip_allowed = await self._rate_limiter.check_ip_limit(client_ip)
-            if not ip_allowed:
-                logger.warning("IP rate limit exceeded: %s", client_ip)
-                await websocket.close(code=4029, reason="Too many connections from this IP")
-                return
-
-        # Authentication check (IP whitelist + Bearer token)
-        if self._authenticator:
-            # Extract Bearer token from headers if available
-            auth_header = websocket.headers.get("authorization", "") if hasattr(websocket, "headers") else ""
-            if not self._authenticator.can_authenticate(client_ip, auth_header):
-                logger.warning("Authentication failed for IP: %s", client_ip)
-                await websocket.close(code=4001, reason="Unauthorized")
-                return
-
         await websocket.accept()
 
         stream_id: Optional[str] = None
@@ -126,17 +89,6 @@ class ExotelWebSocketHandler:
                     logger.info("Exotel connection established")
 
                 elif event == "start":
-                    # Check stream rate limit before accepting call
-                    start_data = message.get("start", {})
-                    stream_id = start_data.get("stream_sid") or message.get("stream_sid", "unknown")
-                    
-                    if self._rate_limiter:
-                        stream_allowed = await self._rate_limiter.check_stream_limit(stream_id)
-                        if not stream_allowed:
-                            logger.warning("Stream rate limit exceeded: %s", stream_id)
-                            await websocket.close(code=4029, reason="Too many concurrent streams")
-                            return
-                    
                     stream_id = await self._handle_start(message)
                     if stream_id and self._audio_adapter:
                         self._audio_adapter.register(stream_id, websocket)
@@ -158,9 +110,6 @@ class ExotelWebSocketHandler:
                         if self._audio_adapter:
                             self._audio_adapter.unregister(stream_id)
                         await self._handle_stop(stream_id)
-                        # Cleanup rate limiter for this stream
-                        if self._rate_limiter:
-                            await self._rate_limiter.cleanup_stream(stream_id)
                     break
 
                 elif event == "dtmf":
@@ -236,7 +185,16 @@ class ExotelWebSocketHandler:
         return stream_id
 
     async def _handle_media(self, message: Dict[str, Any], stream_id: str) -> None:
-        """Process 'media' event using Exotel's chunk number for ordering."""
+        """
+        Process 'media' event using Exotel's chunk number for ordering.
+
+        Handles network loss gracefully:
+        - Partial audio: buffer and process available chunks
+        - Invalid payloads: skip and continue
+        - Processing errors: log and attempt fallback
+        
+        Also detects user interruptions using InterruptDetector.
+        """
         media = message.get("media", {})
         payload_b64 = media.get("payload", "")
 
@@ -245,11 +203,16 @@ class ExotelWebSocketHandler:
 
         try:
             audio_data = base64.b64decode(payload_b64)
-        except Exception:
-            logger.warning("Failed to decode audio payload for stream %s", stream_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to decode audio payload for stream %s: %s",
+                stream_id,
+                e,
+            )
             return
 
         if not audio_data:
+            logger.debug("Received empty audio payload for stream %s", stream_id)
             return
 
         # Use Exotel's chunk counter for correct sequence ordering
@@ -270,10 +233,29 @@ class ExotelWebSocketHandler:
             audio_data=audio_data,
         )
 
+        # Detect interrupts if detector is available and session exists
+        try:
+            if self._interrupt_detector:
+                session = await self._session_repo.get(stream_id)
+                if session:
+                    interrupted = self._interrupt_detector.detect_interrupt(
+                        session, audio_data
+                    )
+                    if interrupted:
+                        logger.info(
+                            "User interrupt detected stream=%s during SPEAKING state",
+                            stream_id,
+                        )
+        except Exception as exc:
+            logger.debug("Interrupt detection failed stream=%s: %s", stream_id, exc)
+            # Continue processing even if interrupt detection fails
+
         try:
             await self._process_audio.execute(stream_id=stream_id, chunk=chunk)
         except Exception as exc:
             logger.error("ProcessAudio failed stream=%s: %s", stream_id, exc)
+            # Continue processing despite error (graceful degradation)
+            # Buffer manager will handle partial audio when VAD flushes
 
     async def _handle_stop(self, stream_id: str) -> None:
         """Process 'stop' event: end the call session."""

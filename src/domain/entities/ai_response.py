@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Optional
 
 _VALID_STATES = ("generating", "complete", "delivered")
 
@@ -14,6 +15,11 @@ class AIResponse:
     Once complete they are immutable; once delivered they are fully consumed.
 
     States: generating → complete → delivered
+    
+    Interrupt Tracking: Optional fields track when/if user interrupted the response:
+    - interrupted_at_token_count: Which token number user interrupted at
+    - interrupted_at_timestamp: When the interrupt was detected
+    - interrupted_context: What was being said when interrupted
     """
 
     def __init__(self, utterance_id: str, timestamp: datetime) -> None:
@@ -25,6 +31,11 @@ class AIResponse:
         self._timestamp: datetime = timestamp
         self._text: str = ""
         self._state: str = "generating"
+        
+        # Interrupt tracking (optional)
+        self._interrupted_at_token_count: Optional[int] = None
+        self._interrupted_at_timestamp: Optional[datetime] = None
+        self._interrupted_context: Optional[str] = None
 
     # --- Identity / read ---
 
@@ -47,6 +58,22 @@ class AIResponse:
     @property
     def state(self) -> str:
         return self._state
+    
+    @property
+    def interrupted_at_token_count(self) -> Optional[int]:
+        return self._interrupted_at_token_count
+    
+    @property
+    def interrupted_at_timestamp(self) -> Optional[datetime]:
+        return self._interrupted_at_timestamp
+    
+    @property
+    def interrupted_context(self) -> Optional[str]:
+        return self._interrupted_context
+    
+    def is_interrupted(self) -> bool:
+        """Check if this response was interrupted by the user."""
+        return self._interrupted_at_token_count is not None
 
     # --- Mutations ---
 
@@ -67,6 +94,29 @@ class AIResponse:
         if self._state != "complete":
             raise ValueError("Cannot deliver a response that is not complete")
         self._state = "delivered"
+    
+    def record_interrupt(
+        self, 
+        token_count: int, 
+        timestamp: datetime, 
+        context: str
+    ) -> None:
+        """
+        Record that this response was interrupted by the user.
+        
+        Args:
+            token_count: Which token number in the response the interrupt occurred at
+            timestamp: When the interrupt was detected
+            context: What was being said at the time of interrupt (partial text)
+        """
+        if token_count < 0:
+            raise ValueError("token_count cannot be negative")
+        if not context:
+            raise ValueError("context cannot be empty")
+        
+        self._interrupted_at_token_count = token_count
+        self._interrupted_at_timestamp = timestamp
+        self._interrupted_context = context
 
     # --- Identity ---
 
