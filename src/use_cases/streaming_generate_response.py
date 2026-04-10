@@ -60,6 +60,9 @@ class StreamingGenerateResponseUseCase:
         Loads the utterance, creates a TokenRingBuffer, starts both LLM and TTS
         concurrently, waits for both to complete, then returns the complete AIResponse.
 
+        Supports user interruption: If user speaks during SPEAKING state, the interrupt
+        flag is set on the session, causing both LLM and TTS tasks to break and return.
+
         Args:
             stream_id: The call stream identifier
             utterance_id: The utterance to generate response for
@@ -89,6 +92,7 @@ class StreamingGenerateResponseUseCase:
             utterance_id,
         )
         session.set_speaking()
+        session.reset_interrupt()  # Clear any prior interrupt flag
 
         # Create token ring buffer (256 token capacity)
         token_buffer = TokenRingBuffer(capacity=256)
@@ -96,10 +100,10 @@ class StreamingGenerateResponseUseCase:
         try:
             # Run LLM producer and TTS consumer concurrently
             llm_task = asyncio.create_task(
-                self._llm_producer(stream_id, utterance, ai_response, token_buffer)
+                self._llm_producer(stream_id, utterance, ai_response, token_buffer, session)
             )
             tts_task = asyncio.create_task(
-                self._tts_consumer(stream_id, ai_response.response_id, token_buffer, audio_out=self._audio_out)
+                self._tts_consumer(stream_id, ai_response.response_id, token_buffer, audio_out=self._audio_out, session=session)
             )
 
             # Wait for both to complete
@@ -119,6 +123,14 @@ class StreamingGenerateResponseUseCase:
 
             return ai_response
 
+        except asyncio.CancelledError:
+            logger.info(
+                "Streaming response cancelled for stream=%s (user interrupt)",
+                stream_id,
+            )
+            session.set_listening()
+            await self._repo.save(session)
+            raise
         except Exception as e:
             logger.error(
                 "Error in streaming response for stream=%s: %s",
@@ -136,6 +148,7 @@ class StreamingGenerateResponseUseCase:
         utterance: Utterance,
         ai_response: AIResponse,
         token_buffer: TokenRingBuffer,
+        session,
     ) -> None:
         """
         LLM producer task: generate tokens and put into ring buffer.
@@ -143,14 +156,22 @@ class StreamingGenerateResponseUseCase:
         Consumes tokens from LLM, accumulates them into ai_response.text,
         and puts each token into the buffer for TTS to consume.
 
+        Business Rule: Breaks if session.is_interrupted() to support user interruption.
+
         Args:
             stream_id: Call identifier
             utterance: User utterance to respond to
             ai_response: Response entity to accumulate text into
             token_buffer: Buffer to receive tokens
+            session: ConversationSession (for interrupt flag checking)
         """
         try:
             async for token in self._llm.generate(stream_id, utterance):
+                # Check for interrupt before processing token
+                if session.is_interrupted():
+                    logger.info("LLM producer: interrupt detected, stopping token generation")
+                    break
+
                 # Accumulate token into final response text
                 ai_response._text += token  # type: ignore
                 # Put token into buffer for TTS to consume
@@ -169,6 +190,7 @@ class StreamingGenerateResponseUseCase:
         response_id: str,
         token_buffer: TokenRingBuffer,
         audio_out: CallerAudioPort,
+        session,
     ) -> None:
         """
         TTS consumer task: synthesize tokens and send audio segments.
@@ -176,14 +198,22 @@ class StreamingGenerateResponseUseCase:
         Reads tokens from buffer, batches them into phrases, synthesizes,
         and sends segments to caller.
 
+        Business Rule: Breaks if session.is_interrupted() to support user interruption.
+
         Args:
             stream_id: Call identifier
             response_id: Response identifier
             token_buffer: Buffer to consume tokens from
             audio_out: Port to send audio segments to
+            session: ConversationSession (for interrupt flag checking)
         """
         try:
             async for segment in self._tts.synthesize_stream(stream_id, response_id, token_buffer):
+                # Check for interrupt before sending segment
+                if session.is_interrupted():
+                    logger.info("TTS consumer: interrupt detected, stopping audio synthesis")
+                    break
+
                 logger.debug(
                     "TTS produced segment: pos=%d bytes=%d is_last=%s",
                     segment.position,

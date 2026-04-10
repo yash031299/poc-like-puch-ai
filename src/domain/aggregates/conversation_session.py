@@ -1,6 +1,7 @@
 """ConversationSession aggregate - root aggregate for managing call lifecycle."""
 
 from typing import Dict, List, Optional
+from datetime import datetime, timezone
 
 from src.domain.entities.call_session import CallSession
 from src.domain.entities.audio_chunk import AudioChunk
@@ -34,6 +35,8 @@ class ConversationSession:
         self._ai_responses: List[AIResponse] = []
         self._speech_segments: List[SpeechSegment] = []
         self._interaction_state: str = "listening"
+        self._interrupted: bool = False  # User interruption flag
+        self._interrupt_timestamp: Optional[object] = None  # When interrupt occurred
     
     @classmethod
     def create(
@@ -167,6 +170,36 @@ class ConversationSession:
         if self.is_ended:
             raise ValueError("Cannot update interaction state of an ended conversation")
         self._interaction_state = "speaking"
+    
+    def mark_interrupted(self) -> None:
+        """
+        Mark session as interrupted by user.
+        
+        Business Rule: Called when user audio is detected during SPEAKING state.
+        Sets the interrupt flag and returns to listening state.
+        """
+        if not self.is_ended:
+            self._interrupted = True
+            self._interrupt_timestamp = datetime.now(timezone.utc)
+            self.set_listening()
+    
+    def is_interrupted(self) -> bool:
+        """
+        Check if session has been interrupted.
+        
+        Returns:
+            True if user has interrupted the AI response
+        """
+        return self._interrupted
+    
+    def reset_interrupt(self) -> None:
+        """
+        Reset interrupt flag for the next response.
+        
+        Called after handling an interrupt to prepare for next cycle.
+        """
+        self._interrupted = False
+        self._interrupt_timestamp = None
     
     def add_audio_chunk(self, chunk: AudioChunk) -> None:
         """
