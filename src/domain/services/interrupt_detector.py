@@ -6,6 +6,7 @@ to check if response should be cancelled.
 
 Architecture:
 - Reuses AudioAnalyzer from Phase 3A for RMS energy calculation
+- Phase 3D.2: Supports adaptive noise floor learning
 - Monitors for audio energy > noise floor during SPEAKING state
 - Sets interrupt flag on ConversationSession atomically
 - Works with bidirectional streaming (user can interrupt mid-response)
@@ -31,10 +32,11 @@ class InterruptDetector:
 
         Args:
             analyzer: AudioAnalyzer instance (can be None for testing)
-            noise_floor_db: Energy threshold in dB for speech detection
+            noise_floor_db: Energy threshold in dB for speech detection (fallback default)
                           Default: -40dB (from AudioAnalyzer.DEFAULT_NOISE_FLOOR_DB)
         """
         self._analyzer = analyzer or AudioAnalyzer(noise_floor_db=noise_floor_db)
+        self._default_noise_floor_db = noise_floor_db
         logger.info(f"InterruptDetector initialized with noise_floor={noise_floor_db}dB")
 
     def detect_interrupt(self, session: ConversationSession, audio_chunk: bytes) -> bool:
@@ -43,13 +45,18 @@ class InterruptDetector:
 
         Business Logic:
         1. Only check during SPEAKING state (AI is talking)
-        2. Analyze audio energy of incoming chunk
-        3. If energy > noise floor, user is likely speaking
-        4. Mark session as interrupted and return True
-        5. Return False if not in SPEAKING state or audio is silence
+        2. Use learned noise floor if available, else default
+        3. Analyze audio energy of incoming chunk
+        4. If energy > noise floor, user is likely speaking
+        5. Mark session as interrupted and return True
+        6. Return False if not in SPEAKING state or audio is silence
+
+        Phase 3D.2: Supports adaptive noise floor learning
+        - If session.is_noise_floor_learned(): use learned threshold
+        - Else: use default threshold
 
         Args:
-            session: ConversationSession with interaction state
+            session: ConversationSession with interaction state and noise floor
             audio_chunk: Raw audio bytes (PCM16LE format)
 
         Returns:
@@ -69,7 +76,17 @@ class InterruptDetector:
         if len(audio_chunk) == 0:
             return False
 
-        is_speech = self._analyzer.is_above_noise_floor(audio_chunk)
+        # Phase 3D.2: Use learned noise floor if available
+        noise_floor_db = session.get_noise_floor()
+        
+        # Temporarily set analyzer to use the appropriate threshold
+        old_threshold = self._analyzer.get_noise_floor_db()
+        try:
+            self._analyzer.set_noise_floor_db(noise_floor_db)
+            is_speech = self._analyzer.is_above_noise_floor(audio_chunk)
+        finally:
+            # Restore original analyzer threshold
+            self._analyzer.set_noise_floor_db(old_threshold)
 
         if not is_speech:
             return False
@@ -79,11 +96,13 @@ class InterruptDetector:
         
         logger.info(
             f"Interrupt detected: stream={session.stream_identifier}, "
-            f"state={session.interaction_state}, user_speaking=True"
+            f"state={session.interaction_state}, user_speaking=True, "
+            f"noise_floor={noise_floor_db:.1f}dB"
         )
 
         return True
 
     def get_noise_floor_db(self) -> float:
-        """Get configured noise floor threshold in dB."""
-        return self._analyzer.get_noise_floor_db()
+        """Get default configured noise floor threshold in dB."""
+        return self._default_noise_floor_db
+

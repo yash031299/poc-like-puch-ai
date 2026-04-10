@@ -2,6 +2,7 @@
 
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
+from dataclasses import dataclass
 
 from src.domain.entities.call_session import CallSession
 from src.domain.entities.audio_chunk import AudioChunk
@@ -10,6 +11,15 @@ from src.domain.entities.ai_response import AIResponse
 from src.domain.entities.speech_segment import SpeechSegment
 from src.domain.value_objects.stream_identifier import StreamIdentifier
 from src.domain.value_objects.audio_format import AudioFormat
+
+
+@dataclass
+class InterruptEvent:
+    """Record of a user interrupt during response delivery."""
+    timestamp: datetime
+    token_count: int
+    context: str
+    intent: str  # User's inferred intent (e.g., "clarification", "objection", "restart")
 
 
 class ConversationSession:
@@ -37,6 +47,11 @@ class ConversationSession:
         self._interaction_state: str = "listening"
         self._interrupted: bool = False  # User interruption flag
         self._interrupt_timestamp: Optional[object] = None  # When interrupt occurred
+        
+        # Phase 3D.2: Adaptive Noise Floor Learning
+        self._noise_floor_db: float = -40.0  # Default noise floor
+        self._is_noise_floor_learned: bool = False  # Flag: learned vs default
+        self._interrupt_history: List[InterruptEvent] = []  # History of all interrupts
     
     @classmethod
     def create(
@@ -201,6 +216,49 @@ class ConversationSession:
         self._interrupted = False
         self._interrupt_timestamp = None
     
+    @property
+    def interrupt_history(self) -> List[InterruptEvent]:
+        """Get the history of all interrupts in this session."""
+        return list(self._interrupt_history)  # Return copy for immutability
+    
+    def record_interrupt(
+        self,
+        token_count: int,
+        context: str,
+        intent: str
+    ) -> None:
+        """
+        Record an interrupt event in the session history.
+        
+        Business Rule: Max 100 interrupts per session to prevent memory bloat.
+        
+        Args:
+            token_count: Which token # the user interrupted at
+            context: What was being said when interrupted
+            intent: User's inferred intent (e.g., "clarification", "objection")
+            
+        Raises:
+            ValueError: If call has ended or too many interrupts recorded
+        """
+        if self.is_ended:
+            raise ValueError("Cannot record interrupt on an ended conversation")
+        if token_count < 0:
+            raise ValueError("token_count cannot be negative")
+        if not context:
+            raise ValueError("context cannot be empty")
+        if not intent:
+            raise ValueError("intent cannot be empty")
+        if len(self._interrupt_history) >= 100:
+            raise ValueError("Maximum interrupts per session (100) reached")
+        
+        event = InterruptEvent(
+            timestamp=datetime.now(timezone.utc),
+            token_count=token_count,
+            context=context,
+            intent=intent
+        )
+        self._interrupt_history.append(event)
+    
     def add_audio_chunk(self, chunk: AudioChunk) -> None:
         """
         Add an audio chunk to the conversation.
@@ -289,6 +347,7 @@ class ConversationSession:
         says 'start over'). Utterances and AI responses are wiped so the
         next exchange starts fresh. Audio chunks are preserved as part of
         the raw call record. Session state and caller info are unchanged.
+        Interrupt history is NOT cleared (preserved for analytics).
 
         Raises:
             ValueError: If the session has already ended.
@@ -336,6 +395,49 @@ class ConversationSession:
         return sorted(
             [s for s in self._speech_segments if s.response_id == response_id]
         )
+
+    # ── Noise Floor Learning (Phase 3D.2) ──────────────────────────────────
+
+    def set_noise_floor(self, db: float) -> None:
+        """
+        Set the learned noise floor threshold.
+
+        Business Rule: Called after NoiseFloorLearner completes learning.
+        Marks the threshold as learned (vs default) and stores it for
+        use by InterruptDetector during subsequent interaction cycles.
+
+        Args:
+            db: Learned noise floor in dB (must be <= 0)
+
+        Raises:
+            ValueError: If db > 0 or session has ended
+        """
+        if self.is_ended:
+            raise ValueError("Cannot set noise floor on an ended conversation")
+        
+        if db > 0:
+            raise ValueError(f"Noise floor must be <= 0dB, got {db}")
+        
+        self._noise_floor_db = db
+        self._is_noise_floor_learned = True
+
+    def get_noise_floor(self) -> float:
+        """
+        Get the noise floor threshold (learned or default).
+
+        Returns:
+            Noise floor in dB (always <= 0)
+        """
+        return self._noise_floor_db
+
+    def is_noise_floor_learned(self) -> bool:
+        """
+        Check if noise floor has been learned.
+
+        Returns:
+            True if learned from first utterance, False if using default
+        """
+        return self._is_noise_floor_learned
 
     def __eq__(self, other: object) -> bool:
         """Check equality based on stream_identifier (aggregate identity)."""

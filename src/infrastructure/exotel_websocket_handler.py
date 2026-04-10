@@ -179,7 +179,14 @@ class ExotelWebSocketHandler:
         return stream_id
 
     async def _handle_media(self, message: Dict[str, Any], stream_id: str) -> None:
-        """Process 'media' event using Exotel's chunk number for ordering."""
+        """
+        Process 'media' event using Exotel's chunk number for ordering.
+
+        Handles network loss gracefully:
+        - Partial audio: buffer and process available chunks
+        - Invalid payloads: skip and continue
+        - Processing errors: log and attempt fallback
+        """
         media = message.get("media", {})
         payload_b64 = media.get("payload", "")
 
@@ -188,11 +195,16 @@ class ExotelWebSocketHandler:
 
         try:
             audio_data = base64.b64decode(payload_b64)
-        except Exception:
-            logger.warning("Failed to decode audio payload for stream %s", stream_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to decode audio payload for stream %s: %s",
+                stream_id,
+                e,
+            )
             return
 
         if not audio_data:
+            logger.debug("Received empty audio payload for stream %s", stream_id)
             return
 
         # Use Exotel's chunk counter for correct sequence ordering
@@ -217,6 +229,8 @@ class ExotelWebSocketHandler:
             await self._process_audio.execute(stream_id=stream_id, chunk=chunk)
         except Exception as exc:
             logger.error("ProcessAudio failed stream=%s: %s", stream_id, exc)
+            # Continue processing despite error (graceful degradation)
+            # Buffer manager will handle partial audio when VAD flushes
 
     async def _handle_stop(self, stream_id: str) -> None:
         """Process 'stop' event: end the call session."""
