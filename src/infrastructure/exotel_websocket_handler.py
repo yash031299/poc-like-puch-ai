@@ -26,6 +26,7 @@ class ExotelWebSocketHandler:
     - Register the WebSocket with the audio adapter so TTS audio can be sent back
     - Decode base64 audio payloads, preserving Exotel's chunk sequence numbers
     - Delegate to use cases (AcceptCall, ProcessAudio, EndCall)
+    - Enforce connection draining (reject new connections if at max capacity)
 
     This class is intentionally thin: all business logic lives in use cases.
     """
@@ -41,6 +42,9 @@ class ExotelWebSocketHandler:
         stt=None,  # SpeechToTextPort — held so we can flush its buffer on disconnect
         buffer_manager=None,  # AudioBufferManager — for VAD-based buffering
         rate_limiter=None,  # RateLimiter — for IP and stream rate limiting
+         authenticator=None,  # AuthenticatorConfig — for IP whitelist + Bearer token auth
+        max_connections: int = 200,  # Max concurrent WebSocket connections (for load balancing)
+        get_active_connection_count=None,  # Callback to get active connection count
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
@@ -51,6 +55,9 @@ class ExotelWebSocketHandler:
         self._stt = stt
         self._buffer_manager = buffer_manager
         self._rate_limiter = rate_limiter
+        self._authenticator = authenticator
+        self._max_connections = max_connections
+        self._get_active_connection_count = get_active_connection_count
 
     async def handle(self, websocket: Any) -> None:
         """
@@ -58,7 +65,23 @@ class ExotelWebSocketHandler:
 
         Exotel AgentStream event sequence:
           connected → start → media* → (mark*) → stop
+        
+        Connection draining: if active connections >= max_connections,
+        reject with 503 Service Unavailable.
+        
+        Authentication: IP whitelist + Bearer token (both optional, OR logic).
         """
+        # Check connection limit (load balancer coordination)
+        if self._get_active_connection_count:
+            active = self._get_active_connection_count()
+            if active >= self._max_connections:
+                logger.warning(
+                    "Connection limit reached: %d >= %d. Rejecting new connection.",
+                    active, self._max_connections
+                )
+                await websocket.close(code=4503, reason="Service Unavailable - load balancer at capacity")
+                return
+        
         # Rate limit check on connection
         client_ip = websocket.client.host if websocket.client else "unknown"
         if self._rate_limiter:
@@ -66,6 +89,15 @@ class ExotelWebSocketHandler:
             if not ip_allowed:
                 logger.warning("IP rate limit exceeded: %s", client_ip)
                 await websocket.close(code=4029, reason="Too many connections from this IP")
+                return
+
+        # Authentication check (IP whitelist + Bearer token)
+        if self._authenticator:
+            # Extract Bearer token from headers if available
+            auth_header = websocket.headers.get("authorization", "") if hasattr(websocket, "headers") else ""
+            if not self._authenticator.can_authenticate(client_ip, auth_header):
+                logger.warning("Authentication failed for IP: %s", client_ip)
+                await websocket.close(code=4001, reason="Unauthorized")
                 return
 
         await websocket.accept()

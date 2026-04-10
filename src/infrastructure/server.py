@@ -42,6 +42,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file before anything reads os.environ
@@ -65,6 +66,7 @@ from src.domain.services.audio_buffer_manager import AudioBufferManager
 from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
 from src.infrastructure.exotel_caller_audio_adapter import ExotelCallerAudioAdapter
 from src.infrastructure.rate_limiter import RateLimiter
+from src.infrastructure.auth import AuthenticatorConfig
 from src.use_cases.accept_call import AcceptCallUseCase
 from src.use_cases.end_call import EndCallUseCase
 from src.use_cases.generate_response import GenerateResponseUseCase
@@ -78,18 +80,24 @@ logger = logging.getLogger(__name__)
 _session_repo: InMemorySessionRepository
 _ws_handler: ExotelWebSocketHandler
 _rate_limiter: RateLimiter
+_authenticator: AuthenticatorConfig
 
 # ── Graceful shutdown tracking ──────────────────────────────────────────────────
 _active_websockets: set = set()  # Track active WebSocket connections
 _shutdown_event: asyncio.Event = asyncio.Event()  # Signals shutdown in progress
 
 
-async def _track_websocket(ws: WebSocket) -> None:
+def _get_active_connection_count() -> int:
+    """Return the current number of active WebSocket connections."""
+    return len(_active_websockets)
+
+
+async def _track_websocket(ws: Any) -> None:
     """Register a WebSocket connection during shutdown tracking."""
     _active_websockets.add(id(ws))
 
 
-async def _untrack_websocket(ws: WebSocket) -> None:
+async def _untrack_websocket(ws: Any) -> None:
     """Unregister a WebSocket connection."""
     _active_websockets.discard(id(ws))
 
@@ -129,7 +137,7 @@ async def _drain_connections(timeout_seconds: int = 30) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise all adapters and use cases on startup."""
-    global _session_repo, _ws_handler, _rate_limiter
+    global _session_repo, _ws_handler, _rate_limiter, _authenticator
 
     dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("true", "1", "yes")
     # HYBRID_MODE: real STT+TTS but stub LLM (for testing when Gemini quota exhausted)
@@ -143,6 +151,12 @@ async def lifespan(app: FastAPI):
     ip_rate_limit = float(os.environ.get("RATE_LIMIT_IP", "100.0"))  # tokens/sec per IP
     stream_rate_limit = float(os.environ.get("RATE_LIMIT_STREAM", "50.0"))  # tokens/sec per stream
     _rate_limiter = RateLimiter(ip_rate=ip_rate_limit, stream_rate=stream_rate_limit)
+    
+    # Authentication configuration (IP whitelist + Bearer tokens)
+    _authenticator = AuthenticatorConfig()
+    
+    # Connection draining configuration (load balancer coordination)
+    max_connections = int(os.environ.get("MAX_CONNECTIONS_PER_INSTANCE", "200"))
 
     # VAD configuration
     vad_enabled = os.environ.get("VAD_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -255,8 +269,10 @@ async def lifespan(app: FastAPI):
         audio_adapter=audio_out,
         reset_session=reset_uc,
         stt=stt,
-        buffer_manager=buffer_manager,  # NEW: Pass to handler for cleanup
-        rate_limiter=_rate_limiter,  # NEW: Pass rate limiter for IP/stream limits
+        buffer_manager=buffer_manager,
+        rate_limiter=_rate_limiter,
+        max_connections=max_connections,
+        get_active_connection_count=_get_active_connection_count,
     )
 
     mode_label = "DEV (stubs)" if dev_mode else ("HYBRID (real STT+TTS)" if hybrid_mode else "PRODUCTION")
