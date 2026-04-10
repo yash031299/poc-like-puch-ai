@@ -40,6 +40,7 @@ class ExotelWebSocketHandler:
         reset_session=None,  # ResetSessionUseCase — handles inbound 'clear' from Exotel
         stt=None,  # SpeechToTextPort — held so we can flush its buffer on disconnect
         buffer_manager=None,  # AudioBufferManager — for VAD-based buffering
+        rate_limiter=None,  # RateLimiter — for IP and stream rate limiting
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
@@ -49,6 +50,7 @@ class ExotelWebSocketHandler:
         self._reset_session = reset_session
         self._stt = stt
         self._buffer_manager = buffer_manager
+        self._rate_limiter = rate_limiter
 
     async def handle(self, websocket: Any) -> None:
         """
@@ -57,6 +59,15 @@ class ExotelWebSocketHandler:
         Exotel AgentStream event sequence:
           connected → start → media* → (mark*) → stop
         """
+        # Rate limit check on connection
+        client_ip = websocket.client.host if websocket.client else "unknown"
+        if self._rate_limiter:
+            ip_allowed = await self._rate_limiter.check_ip_limit(client_ip)
+            if not ip_allowed:
+                logger.warning("IP rate limit exceeded: %s", client_ip)
+                await websocket.close(code=4029, reason="Too many connections from this IP")
+                return
+
         await websocket.accept()
 
         stream_id: Optional[str] = None
@@ -83,6 +94,17 @@ class ExotelWebSocketHandler:
                     logger.info("Exotel connection established")
 
                 elif event == "start":
+                    # Check stream rate limit before accepting call
+                    start_data = message.get("start", {})
+                    stream_id = start_data.get("stream_sid") or message.get("stream_sid", "unknown")
+                    
+                    if self._rate_limiter:
+                        stream_allowed = await self._rate_limiter.check_stream_limit(stream_id)
+                        if not stream_allowed:
+                            logger.warning("Stream rate limit exceeded: %s", stream_id)
+                            await websocket.close(code=4029, reason="Too many concurrent streams")
+                            return
+                    
                     stream_id = await self._handle_start(message)
                     if stream_id and self._audio_adapter:
                         self._audio_adapter.register(stream_id, websocket)
@@ -104,6 +126,9 @@ class ExotelWebSocketHandler:
                         if self._audio_adapter:
                             self._audio_adapter.unregister(stream_id)
                         await self._handle_stop(stream_id)
+                        # Cleanup rate limiter for this stream
+                        if self._rate_limiter:
+                            await self._rate_limiter.cleanup_stream(stream_id)
                     break
 
                 elif event == "dtmf":

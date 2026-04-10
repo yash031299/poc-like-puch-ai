@@ -38,6 +38,7 @@ HYBRID MODE (real STT+TTS, stub LLM — for testing when Gemini quota exhausted)
     your Gemini free tier quota is exhausted.
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -63,6 +64,7 @@ from src.adapters.webrtc_vad_adapter import WebRTCVADAdapter
 from src.domain.services.audio_buffer_manager import AudioBufferManager
 from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
 from src.infrastructure.exotel_caller_audio_adapter import ExotelCallerAudioAdapter
+from src.infrastructure.rate_limiter import RateLimiter
 from src.use_cases.accept_call import AcceptCallUseCase
 from src.use_cases.end_call import EndCallUseCase
 from src.use_cases.generate_response import GenerateResponseUseCase
@@ -75,12 +77,59 @@ logger = logging.getLogger(__name__)
 # ── Shared singletons (created once at startup) ───────────────────────────────
 _session_repo: InMemorySessionRepository
 _ws_handler: ExotelWebSocketHandler
+_rate_limiter: RateLimiter
+
+# ── Graceful shutdown tracking ──────────────────────────────────────────────────
+_active_websockets: set = set()  # Track active WebSocket connections
+_shutdown_event: asyncio.Event = asyncio.Event()  # Signals shutdown in progress
+
+
+async def _track_websocket(ws: WebSocket) -> None:
+    """Register a WebSocket connection during shutdown tracking."""
+    _active_websockets.add(id(ws))
+
+
+async def _untrack_websocket(ws: WebSocket) -> None:
+    """Unregister a WebSocket connection."""
+    _active_websockets.discard(id(ws))
+
+
+async def _drain_connections(timeout_seconds: int = 30) -> None:
+    """
+    Graceful connection draining during shutdown.
+    
+    - Signals all active connections to prepare for graceful close
+    - Waits up to timeout_seconds for connections to complete
+    - Forcefully closes remaining connections after timeout
+    """
+    logger.info(
+        "🔴 Graceful shutdown initiated. Draining %d active WebSocket connection(s). "
+        "Timeout: %ds", len(_active_websockets), timeout_seconds
+    )
+    _shutdown_event.set()
+    
+    try:
+        # Wait for connections to close gracefully (with timeout)
+        start_time = asyncio.get_event_loop().time()
+        while _active_websockets and (asyncio.get_event_loop().time() - start_time) < timeout_seconds:
+            await asyncio.sleep(0.5)
+            remaining = len(_active_websockets)
+            if remaining > 0:
+                logger.debug("Waiting for %d connection(s) to close...", remaining)
+    except Exception as e:
+        logger.error("Error during connection draining: %s", e)
+    
+    if _active_websockets:
+        logger.warning(
+            "⏱️  Shutdown timeout exceeded. Force-closing %d remaining connection(s)",
+            len(_active_websockets)
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise all adapters and use cases on startup."""
-    global _session_repo, _ws_handler
+    global _session_repo, _ws_handler, _rate_limiter
 
     dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("true", "1", "yes")
     # HYBRID_MODE: real STT+TTS but stub LLM (for testing when Gemini quota exhausted)
@@ -89,6 +138,11 @@ async def lifespan(app: FastAPI):
     sample_rate = int(os.environ.get("SAMPLE_RATE", "8000"))  # Exotel default is 8000 Hz
     language_code = os.environ.get("LANGUAGE_CODE", "en-US")
     tts_voice = os.environ.get("TTS_VOICE", "en-US-Neural2-F")
+
+    # Rate limiting configuration
+    ip_rate_limit = float(os.environ.get("RATE_LIMIT_IP", "100.0"))  # tokens/sec per IP
+    stream_rate_limit = float(os.environ.get("RATE_LIMIT_STREAM", "50.0"))  # tokens/sec per stream
+    _rate_limiter = RateLimiter(ip_rate=ip_rate_limit, stream_rate=stream_rate_limit)
 
     # VAD configuration
     vad_enabled = os.environ.get("VAD_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -202,6 +256,7 @@ async def lifespan(app: FastAPI):
         reset_session=reset_uc,
         stt=stt,
         buffer_manager=buffer_manager,  # NEW: Pass to handler for cleanup
+        rate_limiter=_rate_limiter,  # NEW: Pass rate limiter for IP/stream limits
     )
 
     mode_label = "DEV (stubs)" if dev_mode else ("HYBRID (real STT+TTS)" if hybrid_mode else "PRODUCTION")
@@ -221,6 +276,10 @@ async def lifespan(app: FastAPI):
     
     yield
     
+    # Graceful shutdown: drain connections with timeout
+    graceful_shutdown_timeout = int(os.environ.get("GRACEFUL_SHUTDOWN_TIMEOUT_S", "30"))
+    await _drain_connections(timeout_seconds=graceful_shutdown_timeout)
+    
     # Log final metrics on shutdown
     logger.info("Server shutting down. Active sessions: %d", len(_session_repo))
     if buffer_manager and _session_repo:
@@ -238,6 +297,8 @@ async def lifespan(app: FastAPI):
                 sent_segments,
                 metrics['state']
             )
+    
+    logger.info("✅ Server shutdown complete")
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -303,6 +364,12 @@ async def websocket_stream(websocket: WebSocket) -> None:
     Exotel will disconnect if the server doesn't respond within 10 seconds.
     One automatic retry on handshake failure.
     """
+    # Reject new connections during shutdown
+    if _shutdown_event.is_set():
+        logger.warning("Rejecting new WebSocket connection during shutdown")
+        await websocket.close(code=1001, reason="Server shutting down")
+        return
+    
     # Per-connection sample-rate override from Exotel query params
     qs_rate = websocket.query_params.get("sample-rate")
     if qs_rate and qs_rate.isdigit():
@@ -312,11 +379,14 @@ async def websocket_stream(websocket: WebSocket) -> None:
     client_ip = websocket.client.host if websocket.client else "unknown"
     with log_context(client_ip=client_ip):
         try:
+            await _track_websocket(websocket)
             await _ws_handler.handle(websocket)
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected cleanly (Exotel closed connection)")
         except Exception as exc:
             logger.error("Unexpected WebSocket error: %s", exc, exc_info=True)
+        finally:
+            await _untrack_websocket(websocket)
 
 
 @app.exception_handler(Exception)

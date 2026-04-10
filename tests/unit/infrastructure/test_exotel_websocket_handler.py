@@ -17,6 +17,8 @@ class FakeWebSocket:
         self.sent = []
         self.closed = False
         self.accepted = False
+        # Mock client IP for rate limiting tests
+        self.client = type('obj', (object,), {'host': '127.0.0.1'})()
 
     async def accept(self):
         self.accepted = True
@@ -29,7 +31,7 @@ class FakeWebSocket:
     async def send_text(self, data: str):
         self.sent.append(json.loads(data))
 
-    async def close(self):
+    async def close(self, code=None, reason=None):
         self.closed = True
 
 
