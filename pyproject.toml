@@ -25,6 +25,8 @@ dependencies = [
     "python-json-logger>=2.0.0",
     "uvloop>=0.17.0; sys_platform != 'win32'",
     "webrtcvad-wheels>=2.0.14",
+    "redis>=5.0.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
