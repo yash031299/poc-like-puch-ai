@@ -271,6 +271,7 @@ async def lifespan(app: FastAPI):
         stt=stt,
         buffer_manager=buffer_manager,
         rate_limiter=_rate_limiter,
+        authenticator=_authenticator,
         max_connections=max_connections,
         get_active_connection_count=_get_active_connection_count,
     )

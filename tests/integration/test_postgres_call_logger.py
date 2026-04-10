@@ -168,7 +168,11 @@ async def test_postgres_logger_statistics(postgres_logger):
 @pytest.mark.asyncio
 async def test_postgres_logger_handles_connection_error(postgres_logger):
     """Test graceful handling of connection errors."""
-    postgres_logger.db_pool.execute = AsyncMock(side_effect=Exception("Connection failed"))
+    postgres_logger.db_pool.cursor = MagicMock()
+    postgres_logger.db_pool.cursor.return_value.__aenter__ = AsyncMock(
+        side_effect=Exception("Connection failed")
+    )
+    postgres_logger.db_pool.rollback = AsyncMock()
     
     call_record = CallRecord(
         call_id=str(uuid.uuid4()),
@@ -183,8 +187,8 @@ async def test_postgres_logger_handles_connection_error(postgres_logger):
         error_message=None,
     )
     
-    # Should not raise exception
-    with pytest.raises(Exception):
+    # Should raise exception since DB is unavailable
+    with pytest.raises(Exception, match="Connection failed"):
         await postgres_logger.log_call(call_record)
 
 
