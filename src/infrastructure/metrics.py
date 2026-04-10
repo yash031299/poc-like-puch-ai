@@ -161,6 +161,28 @@ class MetricsCollector:
             registry=self.registry,
         )
 
+        # ── Rate Limiting Metrics ───────────────────────────────────────────
+        self.rate_limit_hits = Counter(
+            "rate_limit_hits_total",
+            "Total number of rate limit rejections",
+            labelnames=["tenant_id", "level"],
+            registry=self.registry,
+        )
+
+        self.queue_depth = Gauge(
+            "rate_limit_queue_depth",
+            "Current depth of rate limit queue per tenant",
+            labelnames=["tenant_id"],
+            registry=self.registry,
+        )
+
+        self.available_tokens = Gauge(
+            "rate_limit_available_tokens",
+            "Available tokens in rate limit bucket",
+            labelnames=["tenant_id", "level"],
+            registry=self.registry,
+        )
+
         # ── Internal state ──────────────────────────────────────────────────
         self.circuit_breaker_states: Dict[str, str] = {}
         self.pipeline_latencies = deque(maxlen=100)  # Keep last 100 latencies for p95
@@ -322,6 +344,42 @@ class MetricsCollector:
         """
         self.daily_cost.set(cost_usd)
         logger.debug("💵 Daily cost: $%.2f", cost_usd)
+
+    # ── Rate Limiting Metrics ───────────────────────────────────────────────
+
+    def record_rate_limit_hit(self, tenant_id: str, level: str) -> None:
+        """
+        Record a rate limit rejection.
+
+        Args:
+            tenant_id: Tenant identifier
+            level: Rate limit level (tenant, region, or global)
+        """
+        self.rate_limit_hits.labels(tenant_id=tenant_id, level=level).inc()
+        logger.warning(f"⛔ Rate limit hit for {tenant_id} at {level} level")
+
+    def set_queue_depth(self, tenant_id: str, depth: int) -> None:
+        """
+        Set the depth of rate limit queue for a tenant.
+
+        Args:
+            tenant_id: Tenant identifier
+            depth: Queue depth
+        """
+        self.queue_depth.labels(tenant_id=tenant_id).set(depth)
+        logger.debug(f"📊 Queue depth for {tenant_id}: {depth}")
+
+    def set_available_tokens(self, tenant_id: str, level: str, tokens: float) -> None:
+        """
+        Set available tokens for a rate limit bucket.
+
+        Args:
+            tenant_id: Tenant identifier
+            level: Rate limit level (tenant, region, or global)
+            tokens: Number of available tokens
+        """
+        self.available_tokens.labels(tenant_id=tenant_id, level=level).set(tokens)
+        logger.debug(f"🎫 Available tokens for {tenant_id} ({level}): {tokens:.1f}")
 
     # ── Export ──────────────────────────────────────────────────────────────
 

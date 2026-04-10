@@ -1,0 +1,104 @@
+# Rate Limiting Configuration
+# Hierarchical limits: per-tenant, per-region, and global
+# Token bucket algorithm: tokens are refilled at constant rate
+
+# Global rate limit (calls per minute across all regions)
+global:
+  calls_per_minute: 1000
+  burst_capacity: 1200  # Allow 20% burst capacity
+
+# Per-region rate limits
+regions:
+  # India region
+  india:
+    calls_per_minute: 300
+    burst_capacity: 360
+    countries: [IN]
+
+  # US region
+  us:
+    calls_per_minute: 250
+    burst_capacity: 300
+    countries: [US, CA]
+
+  # EU region
+  eu:
+    calls_per_minute: 200
+    burst_capacity: 240
+    countries: [GB, DE, FR, IT, ES, NL, BE, AT]
+
+  # Default region (fallback)
+  default:
+    calls_per_minute: 100
+    burst_capacity: 120
+
+# Tenant tiers (different pricing/limit tiers)
+tiers:
+  # Free tier
+  free:
+    calls_per_minute: 10
+    burst_capacity: 12
+    description: "Free tier - 10 calls/min"
+    max_concurrent_calls: 2
+    features: []
+
+  # Pro tier
+  pro:
+    calls_per_minute: 100
+    burst_capacity: 120
+    description: "Pro tier - 100 calls/min"
+    max_concurrent_calls: 20
+    features:
+      - priority_queuing
+      - metrics_export
+
+  # Enterprise tier
+  enterprise:
+    calls_per_minute: 500
+    burst_capacity: 600
+    description: "Enterprise tier - 500 calls/min"
+    max_concurrent_calls: 100
+    features:
+      - priority_queuing
+      - metrics_export
+      - custom_limits
+      - dedicated_support
+
+# Per-tenant overrides (specific customer limits)
+# Override the tier limits for specific tenants
+tenant_overrides:
+  tenant_123:
+    tier: pro
+    calls_per_minute: 150  # Override pro tier limit
+    burst_capacity: 180
+    region: india
+
+  tenant_456:
+    tier: enterprise
+    calls_per_minute: 1000  # Custom limit for enterprise customer
+    burst_capacity: 1200
+    region: us
+
+# Rejection handling
+rejection:
+  # Queue size when rate limit is exceeded
+  queue_max_size: 100
+  # Time-to-live for queued requests (seconds)
+  queue_ttl_seconds: 30
+  # Fair queuing strategy: fifo, priority, or random
+  queue_strategy: fifo
+  # Response code for rate limited requests
+  http_status: 429
+  # Whether to queue rejected calls or reject immediately
+  enable_fair_queuing: true
+
+# Metrics and monitoring
+monitoring:
+  # Collect detailed metrics (has small overhead)
+  collect_metrics: true
+  # Alert when approaching rate limit (% threshold)
+  alert_threshold_percent: 80
+  # Export metrics interval (seconds)
+  export_interval_seconds: 60
+  # Enable debug logging
+  debug_logging: false
