@@ -51,6 +51,10 @@ load_dotenv()  # Load .env file before anything reads os.environ
 from src.infrastructure.logging_config import configure_logging, log_context  # noqa: E402
 configure_logging()
 
+# Initialize OpenTelemetry tracing
+from src.infrastructure.tracing import init_tracing  # noqa: E402
+init_tracing()
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
@@ -368,6 +372,102 @@ async def passthru(request: Request) -> JSONResponse:
         )
 
     return JSONResponse({"status": "ok"})
+
+
+@app.get("/cost-metrics")
+async def get_cost_metrics() -> JSONResponse:
+    """Get current cost metrics and budget status."""
+    if not hasattr(app.state, 'cost_tracker'):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Cost tracker not initialized"},
+        )
+    
+    tracker = app.state.cost_tracker
+    breakdown = tracker.get_cost_breakdown()
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "timestamp": __import__('datetime').datetime.now().isoformat(),
+            "daily": {
+                "cost": round(breakdown["total"], 6),
+                "budget": tracker.daily_budget_usd,
+                "remaining": round(breakdown["remaining_budget"], 6),
+                "percentage": round(breakdown["budget_percentage"], 2),
+                "exceeded": tracker.is_budget_exceeded(),
+            },
+            "monthly": {
+                "cost": round(breakdown["monthly_total"], 6),
+                "budget": tracker.monthly_budget_usd,
+                "remaining": round(breakdown["monthly_remaining"], 6),
+                "percentage": round(breakdown["monthly_percentage"], 2),
+                "exceeded": tracker.is_monthly_budget_exceeded(),
+            },
+            "providers": {
+                "google_stt": round(breakdown["google_stt"], 6),
+                "google_tts": round(breakdown["google_tts"], 6),
+                "gemini": round(breakdown["gemini"], 6),
+                "openai": round(breakdown["openai"], 6),
+            },
+        },
+    )
+
+
+@app.get("/cost-per-user/{user_id}")
+async def get_user_costs(user_id: str) -> JSONResponse:
+    """Get cost breakdown for a specific user."""
+    if not hasattr(app.state, 'cost_tracker'):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Cost tracker not initialized"},
+        )
+    
+    tracker = app.state.cost_tracker
+    user_costs = tracker.get_user_costs(user_id)
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "timestamp": __import__('datetime').datetime.now().isoformat(),
+            "user_id": user_id,
+            "daily_cost": round(user_costs["daily_cost"], 6),
+            "call_count": user_costs["call_count"],
+            "average_cost_per_call": round(user_costs["average_cost_per_call"], 6),
+            "daily_limit": user_costs["budget_limit"],
+            "limit_exceeded": user_costs["budget_exceeded"],
+        },
+    )
+
+
+@app.get("/cache-metrics")
+async def get_cache_metrics() -> JSONResponse:
+    """Get semantic cache hit rate and metrics."""
+    if not hasattr(app.state, 'semantic_cache'):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Semantic cache not initialized"},
+        )
+    
+    cache = app.state.semantic_cache
+    metrics = cache.get_metrics()
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "timestamp": __import__('datetime').datetime.now().isoformat(),
+            "hit_count": metrics["hit_count"],
+            "miss_count": metrics["miss_count"],
+            "total_requests": metrics["total_requests"],
+            "hit_rate_percent": metrics["hit_rate_percent"],
+            "average_hit_similarity": metrics["average_hit_similarity"],
+            "configuration": {
+                "threshold": metrics["threshold"],
+                "ttl_seconds": metrics["ttl_seconds"],
+                "max_entries": metrics["max_entries"],
+            },
+        },
+    )
 
 
 @app.websocket("/stream")

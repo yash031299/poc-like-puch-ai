@@ -255,3 +255,229 @@ def test_cost_tracker_multiple_days():
     
     # Should be different
     assert new_today_cost != today_cost
+
+
+def test_cost_tracker_monthly_budget():
+    """Test monthly budget tracking."""
+    tracker = CostTracker(
+        daily_budget_usd=100.0,
+        monthly_budget_usd=500.0
+    )
+    
+    # Record calls
+    for i in range(3):
+        tracker.record_call({
+            "call_id": f"call-{i}",
+            "stt_duration_seconds": 60,
+            "tts_text": "Test" * 100,
+            "input_tokens": 200,
+            "output_tokens": 100,
+        })
+    
+    monthly_cost = tracker.get_cost_breakdown()["monthly_total"]
+    assert monthly_cost > 0
+    assert tracker.get_monthly_remaining_budget() > 0
+
+
+def test_cost_tracker_monthly_budget_exceeded():
+    """Test detection of monthly budget exceeded."""
+    tracker = CostTracker(monthly_budget_usd=0.001)
+    
+    # Record a call that exceeds budget
+    tracker.record_call({
+        "call_id": "test-call",
+        "stt_duration_seconds": 60,
+        "tts_text": "Test" * 100,
+        "input_tokens": 1000,
+        "output_tokens": 500,
+    })
+    
+    assert tracker.is_monthly_budget_exceeded()
+
+
+def test_cost_tracker_per_user_costs():
+    """Test per-user cost tracking."""
+    tracker = CostTracker()
+    
+    # Record costs for different users
+    tracker.record_call({
+        "call_id": "call-1",
+        "user_id": "user-1",
+        "stt_duration_seconds": 30,
+        "tts_text": "Test",
+        "input_tokens": 50,
+        "output_tokens": 25,
+    })
+    
+    tracker.record_call({
+        "call_id": "call-2",
+        "user_id": "user-2",
+        "stt_duration_seconds": 60,
+        "tts_text": "Test" * 2,
+        "input_tokens": 100,
+        "output_tokens": 50,
+    })
+    
+    user1_costs = tracker.get_user_costs("user-1")
+    user2_costs = tracker.get_user_costs("user-2")
+    
+    assert user1_costs["user_id"] == "user-1"
+    assert user1_costs["call_count"] == 1
+    assert user2_costs["call_count"] == 1
+    assert user2_costs["daily_cost"] > user1_costs["daily_cost"]
+
+
+def test_cost_tracker_per_user_limit_exceeded():
+    """Test per-user daily limit exceeded."""
+    tracker = CostTracker(per_user_daily_limit_usd=0.001)
+    
+    # Record a call that exceeds user limit
+    tracker.record_call({
+        "call_id": "test-call",
+        "user_id": "user-1",
+        "stt_duration_seconds": 60,
+        "tts_text": "Test" * 100,
+        "input_tokens": 1000,
+        "output_tokens": 500,
+    })
+    
+    user_costs = tracker.get_user_costs("user-1")
+    assert user_costs["budget_exceeded"]
+
+
+def test_cost_tracker_openai_provider():
+    """Test OpenAI provider cost calculation."""
+    tracker = CostTracker()
+    
+    # OpenAI and Gemini have different pricing models
+    # OpenAI: $0.0005 per 1K input, $0.0015 per 1K output
+    # Gemini: $0.075 per 1M input, $0.3 per 1M output
+    openai_cost = tracker.calculate_llm_cost(
+        input_tokens=1000000,
+        output_tokens=500000,
+        provider="openai"
+    )
+    
+    gemini_cost = tracker.calculate_llm_cost(
+        input_tokens=1000000,
+        output_tokens=500000,
+        provider="gemini"
+    )
+    
+    # Both should be valid costs
+    assert openai_cost > 0
+    assert gemini_cost > 0
+    # Gemini is actually cheaper per token at scale
+    assert gemini_cost < openai_cost
+
+
+def test_cost_tracker_provider_breakdown():
+    """Test cost breakdown by provider."""
+    tracker = CostTracker()
+    
+    # Record costs from different providers
+    tracker.record_call({
+        "call_id": "call-1",
+        "stt_duration_seconds": 30,
+        "tts_text": "Test",
+        "input_tokens": 50,
+        "output_tokens": 25,
+        "provider": "gemini",
+    })
+    
+    tracker.record_call({
+        "call_id": "call-2",
+        "stt_duration_seconds": 30,
+        "tts_text": "Test",
+        "input_tokens": 50,
+        "output_tokens": 25,
+        "provider": "openai",
+    })
+    
+    breakdown = tracker.get_cost_breakdown()
+    assert breakdown["gemini"] > 0
+    assert breakdown["openai"] > 0
+
+
+def test_cost_tracker_monthly_reset():
+    """Test monthly cost reset."""
+    tracker = CostTracker()
+    
+    # Record costs
+    tracker.record_call({
+        "call_id": "call-1",
+        "user_id": "user-1",
+        "stt_duration_seconds": 30,
+        "tts_text": "Test",
+        "input_tokens": 50,
+        "output_tokens": 25,
+    })
+    
+    initial_monthly_cost = tracker.get_cost_breakdown()["monthly_total"]
+    assert initial_monthly_cost > 0
+    
+    # Reset monthly
+    tracker.reset_monthly_cost()
+    
+    assert tracker.get_cost_breakdown()["monthly_total"] == 0.0
+    assert tracker.get_daily_cost() == 0.0
+    assert len(tracker.user_daily_costs) == 0
+
+
+def test_cost_tracker_alert_threshold():
+    """Test alert threshold for budget."""
+    tracker = CostTracker(
+        daily_budget_usd=10.0,
+        alert_threshold_percent=0.5
+    )
+    
+    # Should not alert at 40% usage
+    tracker.record_call({
+        "call_id": "call-1",
+        "stt_duration_seconds": 10,
+        "tts_text": "Test",
+        "input_tokens": 10,
+        "output_tokens": 5,
+    })
+    
+    # This doesn't raise an exception, but logs a warning internally
+    # The test verifies it doesn't crash
+
+
+def test_cost_tracker_cost_summary():
+    """Test cost summary generation."""
+    tracker = CostTracker()
+    
+    tracker.record_call({
+        "call_id": "call-1",
+        "stt_duration_seconds": 30,
+        "tts_text": "Test",
+        "input_tokens": 50,
+        "output_tokens": 25,
+    })
+    
+    summary = tracker.get_cost_summary()
+    assert "Daily Cost Summary" in summary
+    assert "Daily Total" in summary
+    assert "Monthly Total" in summary
+    assert "Budget" in summary
+
+
+def test_cost_tracker_budget_percentage_calculation():
+    """Test budget percentage calculation."""
+    tracker = CostTracker(daily_budget_usd=100.0, monthly_budget_usd=1000.0)
+    
+    tracker.record_call({
+        "call_id": "call-1",
+        "stt_duration_seconds": 30,
+        "tts_text": "Test",
+        "input_tokens": 50,
+        "output_tokens": 25,
+    })
+    
+    daily_pct = tracker.get_budget_percentage()
+    monthly_pct = tracker.get_monthly_budget_percentage()
+    
+    assert 0 < daily_pct < 100
+    assert 0 < monthly_pct < 100
+    assert daily_pct > monthly_pct  # Should use more of daily budget

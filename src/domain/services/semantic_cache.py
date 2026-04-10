@@ -1,4 +1,26 @@
-"""SemanticCache — Redis-backed caching service using embedding similarity."""
+"""SemanticCache — Redis-backed caching service using embedding similarity.
+
+Caches AI responses by semantic similarity to user utterances, enabling
+high-quality cache hits without exact-match requirements.
+
+Metrics:
+- Cache hit rate (%)
+- Cache size
+- Average similarity score for hits
+- TTL enforcement with LRU eviction
+
+Usage:
+    cache = SemanticCache(redis_client, embedding_model)
+    
+    # Check cache for similar utterance
+    response = await cache.get("tell me a joke")
+    
+    # Store response
+    await cache.set("tell me a joke", ai_response)
+    
+    # Get metrics
+    metrics = cache.get_metrics()
+"""
 
 import hashlib
 import json
@@ -23,6 +45,12 @@ class SemanticCache:
 
     Uses embedding vectors to match similar utterances (cosine similarity >0.85).
     Stores serialized AIResponse objects in Redis with TTL=24h and LRU eviction.
+    
+    Tracks cache metrics:
+    - Hit/miss counts
+    - Hit rate percentage
+    - Average similarity for hits
+    - Cache size and entry count
     """
 
     def __init__(self, redis_client, embedding_model):
@@ -39,6 +67,12 @@ class SemanticCache:
         self._ttl = _CACHE_TTL_SECONDS
         self._threshold = _SIMILARITY_THRESHOLD
         self._max_entries = _MAX_CACHE_ENTRIES
+        
+        # Metrics tracking
+        self._hit_count = 0
+        self._miss_count = 0
+        self._total_similarity = 0.0
+        self._total_hits_for_avg = 0
 
     async def get(self, utterance: str) -> Optional[AIResponse]:
         """
@@ -59,6 +93,7 @@ class SemanticCache:
             keys = await self._redis.keys("cache:emb:*")
             if not keys:
                 logger.debug("Cache miss for utterance (no cached entries)")
+                self._miss_count += 1
                 return None
 
             best_similarity = -1.0
@@ -87,6 +122,7 @@ class SemanticCache:
                     best_similarity,
                     self._threshold,
                 )
+                self._miss_count += 1
                 return None
 
             # Retrieve response using the matching key
@@ -94,6 +130,7 @@ class SemanticCache:
             cached_response_json = await self._redis.get(response_key)
             if not cached_response_json:
                 logger.debug("Cache miss (embedding found but response missing)")
+                self._miss_count += 1
                 return None
 
             # Deserialize response
@@ -104,10 +141,17 @@ class SemanticCache:
                 "Cache hit for utterance (similarity=%.3f)",
                 best_similarity,
             )
+            
+            # Track metrics
+            self._hit_count += 1
+            self._total_similarity += best_similarity
+            self._total_hits_for_avg += 1
+            
             return response
 
         except Exception as e:
             logger.error("Error retrieving from cache: %s", e)
+            self._miss_count += 1
             return None
 
     async def set(self, utterance: str, response: AIResponse) -> None:
@@ -193,3 +237,52 @@ class SemanticCache:
         response._state = data["state"]
         response._response_id = data["response_id"]
         return response
+
+    def get_metrics(self) -> dict:
+        """
+        Get cache metrics.
+
+        Returns:
+            Dict with cache hit rate, hit count, and other metrics
+        """
+        total_requests = self._hit_count + self._miss_count
+        hit_rate = (
+            (self._hit_count / total_requests * 100)
+            if total_requests > 0
+            else 0.0
+        )
+        avg_similarity = (
+            (self._total_similarity / self._total_hits_for_avg)
+            if self._total_hits_for_avg > 0
+            else 0.0
+        )
+
+        return {
+            "hit_count": self._hit_count,
+            "miss_count": self._miss_count,
+            "total_requests": total_requests,
+            "hit_rate_percent": round(hit_rate, 2),
+            "average_hit_similarity": round(avg_similarity, 3),
+            "threshold": self._threshold,
+            "ttl_seconds": self._ttl,
+            "max_entries": self._max_entries,
+        }
+
+    def reset_metrics(self) -> None:
+        """Reset cache metrics."""
+        logger.info(
+            f"Resetting cache metrics. Hits: {self._hit_count}, "
+            f"Misses: {self._miss_count}"
+        )
+        self._hit_count = 0
+        self._miss_count = 0
+        self._total_similarity = 0.0
+        self._total_hits_for_avg = 0
+
+    async def clear(self) -> None:
+        """Clear all cache entries."""
+        logger.warning("Clearing all cache entries")
+        keys = await self._redis.keys("cache:*")
+        if keys:
+            await self._redis.delete(*keys)
+        self.reset_metrics()

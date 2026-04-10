@@ -1,0 +1,108 @@
+# Cost Optimization & FinOps Configuration
+# Configure budgets, thresholds, and provider costs for the system
+
+# Daily budget in USD (hard limit)
+daily_budget_usd: 500.0
+
+# Monthly budget in USD (hard limit)
+monthly_budget_usd: 10000.0
+
+# Per-user daily limit in USD
+per_user_daily_limit_usd: 100.0
+
+# Alert threshold percentage (0-1)
+# Alert when budget usage reaches this percentage
+alert_threshold_percent: 0.80
+
+# Provider-specific budgets (monthly)
+provider_budgets:
+  google:
+    stt: 300.0      # Google STT monthly budget
+    tts: 300.0      # Google TTS monthly budget
+    total: 600.0    # Combined Google budget
+  openai:
+    llm: 400.0      # OpenAI LLM monthly budget
+  gemini:
+    llm: 500.0      # Gemini LLM monthly budget
+
+# Provider costs (per-unit pricing as of 2024)
+# These are approximate and should be updated as pricing changes
+provider_costs:
+  google:
+    stt_cost_per_minute: 0.015         # $0.015 per minute
+    tts_cost_per_1k_chars: 0.015       # $0.015 per 1K characters
+  openai:
+    llm_input_cost_per_1k: 0.0005      # $0.0005 per 1K input tokens
+    llm_output_cost_per_1k: 0.0015     # $0.0015 per 1K output tokens
+  gemini:
+    llm_input_cost_per_1m: 0.075       # $0.075 per 1M input tokens
+    llm_output_cost_per_1m: 0.3        # $0.3 per 1M output tokens
+
+# Cost thresholds for provider switching
+# When a provider reaches this cost, consider switching
+cost_thresholds:
+  google_stt: 240.0      # 80% of $300 budget
+  google_tts: 240.0      # 80% of $300 budget
+  openai: 320.0          # 80% of $400 budget
+  gemini: 400.0          # 80% of $500 budget
+
+# Caching configuration
+cache:
+  # Enable semantic cache for LLM responses
+  enable_semantic_cache: true
+  
+  # Cache TTL in seconds
+  ttl_seconds: 86400  # 24 hours
+  
+  # Similarity threshold for cache hits (0-1)
+  similarity_threshold: 0.85
+  
+  # Maximum cache entries
+  max_entries: 1000
+  
+  # Expected cache hit rate percentage
+  target_hit_rate_percent: 30
+
+# Provider fallback configuration
+fallback:
+  # Enable automatic fallback between providers
+  enable_fallback: true
+  
+  # Providers in priority order
+  providers:
+    - google
+    - openai
+  
+  # Health check interval in seconds
+  health_check_interval_seconds: 300
+  
+  # Error threshold before marking provider as degraded
+  error_rate_threshold: 0.2  # 20%
+
+# Dashboard and reporting
+dashboard:
+  # Enable cost dashboard endpoint
+  enable_dashboard: true
+  
+  # Metrics to track
+  metrics:
+    - daily_cost
+    - monthly_cost
+    - provider_cost_breakdown
+    - per_user_costs
+    - cache_hit_rate
+    - provider_status
+  
+  # Report frequency
+  report_interval_minutes: 60
+
+# Optimization targets
+optimization_targets:
+  # Target cost reduction percentage (0-1)
+  cost_reduction_target: 0.25  # 25% reduction goal
+  
+  # Target cache hit rate (0-1)
+  cache_hit_rate_target: 0.30  # 30%
+  
+  # Target provider cost savings (0-1)
+  provider_switching_savings: 0.15  # 15% savings from switching
