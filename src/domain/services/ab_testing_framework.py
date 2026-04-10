@@ -31,6 +31,7 @@ class ABTestingFramework:
     # Min samples per variant before computing winner
     MIN_SAMPLES_PER_VARIANT = 10
     CONFIDENCE_THRESHOLD = 0.90  # 90% confidence for switchover
+    IMPROVEMENT_THRESHOLD = 0.10  # Require at least 10% improvement to recommend switchover
     
     def __init__(self):
         """Initialize the A/B testing framework."""
@@ -166,26 +167,30 @@ class ABTestingFramework:
             f"Test (n={len(test_metrics)}): {test_avg}"
         )
         
-        # Simple heuristic: if test is better on both metrics, recommend switchover
+        # Compare metrics with significance threshold: test must show 10%+ improvement to win
         test_wins_count = 0
         
         # Lower interrupt_rate is better
         if (
             "interrupt_rate" in test_avg and
-            "interrupt_rate" in control_avg and
-            test_avg["interrupt_rate"] < control_avg["interrupt_rate"]
+            "interrupt_rate" in control_avg
         ):
-            test_wins_count += 1
+            # Test wins if it's at least 10% lower
+            improvement = (control_avg["interrupt_rate"] - test_avg["interrupt_rate"]) / control_avg["interrupt_rate"]
+            if improvement >= self.IMPROVEMENT_THRESHOLD:
+                test_wins_count += 1
         
         # Shorter call_duration is better (implies faster/more satisfied)
         if (
             "call_duration" in test_avg and
-            "call_duration" in control_avg and
-            test_avg["call_duration"] < control_avg["call_duration"]
+            "call_duration" in control_avg
         ):
-            test_wins_count += 1
+            # Test wins if it's at least 10% shorter
+            improvement = (control_avg["call_duration"] - test_avg["call_duration"]) / control_avg["call_duration"]
+            if improvement >= self.IMPROVEMENT_THRESHOLD:
+                test_wins_count += 1
         
-        # Recommend switchover if test wins on both metrics
+        # Recommend switchover if test wins on both metrics with significant improvement
         if test_wins_count >= 2:
             logger.info("✅ A/B test recommends switchover to TEST variant")
             return self.VARIANT_TEST

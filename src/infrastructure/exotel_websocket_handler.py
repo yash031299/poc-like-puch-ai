@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from src.domain.entities.audio_chunk import AudioChunk
+from src.domain.services.interrupt_detector import InterruptDetector
 from src.domain.value_objects.audio_format import AudioFormat
+from src.ports.session_repository_port import SessionRepositoryPort
 from src.use_cases.accept_call import AcceptCallUseCase
 from src.use_cases.end_call import EndCallUseCase
 from src.use_cases.process_audio import ProcessAudioUseCase
@@ -35,20 +37,24 @@ class ExotelWebSocketHandler:
         accept_call: AcceptCallUseCase,
         process_audio: ProcessAudioUseCase,
         end_call: EndCallUseCase,
+        session_repo: SessionRepositoryPort,
         sample_rate: int = 16000,
         audio_adapter=None,
         reset_session=None,  # ResetSessionUseCase — handles inbound 'clear' from Exotel
         stt=None,  # SpeechToTextPort — held so we can flush its buffer on disconnect
         buffer_manager=None,  # AudioBufferManager — for VAD-based buffering
+        interrupt_detector=None,  # InterruptDetector — detect user interruptions
     ) -> None:
         self._accept_call = accept_call
         self._process_audio = process_audio
         self._end_call = end_call
+        self._session_repo = session_repo
         self._sample_rate = sample_rate
         self._audio_adapter = audio_adapter
         self._reset_session = reset_session
         self._stt = stt
         self._buffer_manager = buffer_manager
+        self._interrupt_detector = interrupt_detector or InterruptDetector()
 
     async def handle(self, websocket: Any) -> None:
         """
@@ -186,6 +192,8 @@ class ExotelWebSocketHandler:
         - Partial audio: buffer and process available chunks
         - Invalid payloads: skip and continue
         - Processing errors: log and attempt fallback
+        
+        Also detects user interruptions using InterruptDetector.
         """
         media = message.get("media", {})
         payload_b64 = media.get("payload", "")
@@ -224,6 +232,23 @@ class ExotelWebSocketHandler:
             audio_format=audio_format,
             audio_data=audio_data,
         )
+
+        # Detect interrupts if detector is available and session exists
+        try:
+            if self._interrupt_detector:
+                session = await self._session_repo.get(stream_id)
+                if session:
+                    interrupted = await self._interrupt_detector.detect_interrupt(
+                        session, audio_data
+                    )
+                    if interrupted:
+                        logger.info(
+                            "User interrupt detected stream=%s during SPEAKING state",
+                            stream_id,
+                        )
+        except Exception as exc:
+            logger.debug("Interrupt detection failed stream=%s: %s", stream_id, exc)
+            # Continue processing even if interrupt detection fails
 
         try:
             await self._process_audio.execute(stream_id=stream_id, chunk=chunk)

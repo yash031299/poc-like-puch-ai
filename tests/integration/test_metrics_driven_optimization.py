@@ -4,8 +4,11 @@ import pytest
 from src.domain.services.response_length_optimizer import ResponseLengthOptimizer
 from src.domain.services.interrupt_metrics import InterruptMetrics
 from src.domain.aggregates.conversation_session import ConversationSession
+from src.domain.entities.call_session import CallSession
 from src.domain.entities.utterance import Utterance
 from src.domain.entities.ai_response import AIResponse
+from src.domain.value_objects.stream_identifier import StreamIdentifier
+from src.domain.value_objects.audio_format import AudioFormat
 
 
 class TestLengthConstraintEnforcement:
@@ -38,25 +41,37 @@ class TestLengthConstraintEnforcement:
         assert constraint[0].isupper() or constraint[0] in "Keep"
         assert constraint.endswith(".")
     
-    def test_optimizer_integrates_with_interrupt_metrics(self, metrics_service, optimizer):
+    @pytest.mark.asyncio
+    async def test_optimizer_integrates_with_interrupt_metrics(self, metrics_service, optimizer):
         """Test: Optimizer correctly reads metrics from InterruptMetrics service."""
+        from datetime import datetime, timezone
+        
         stream_id = "test_stream"
         
         # Simulate recording some interrupts via metrics service
-        session = ConversationSession(stream_identifier=stream_id)
-        utterance = Utterance(text="Hello", utterance_id="u1")
-        response = AIResponse(text="Hi there", response_id="r1")
+        call_session = CallSession(
+            stream_identifier=StreamIdentifier(stream_id),
+            caller_number="+1234567890",
+            called_number="+0987654321",
+            audio_format=AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
+        )
+        session = ConversationSession(call_session)
+        now = datetime.now(timezone.utc)
+        response = AIResponse(utterance_id="u1", timestamp=now)
+        response._text = "Hi there"  # Set text directly
         
         # Record multiple early interrupts
+        metrics_service.increment_response_count(stream_id)
         for _ in range(3):
-            metrics_service.record_interrupt(
+            await metrics_service.record_interrupt(
                 session=session,
                 response=response,
                 token_count=5,  # Early interrupt (< 10 tokens)
             )
         
         # Record a late interrupt
-        metrics_service.record_interrupt(
+        metrics_service.increment_response_count(stream_id)
+        await metrics_service.record_interrupt(
             session=session,
             response=response,
             token_count=25,

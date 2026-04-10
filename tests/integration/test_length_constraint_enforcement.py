@@ -16,33 +16,37 @@ class TestABTestingFrameworkIntegration:
     @pytest.mark.asyncio
     async def test_full_ab_flow_with_winner_determination(self, framework):
         """Test: Complete A/B testing flow from assignment to winner determination."""
-        # Simulate 10 control users with certain metrics
-        for i in range(10):
-            stream_id = f"control_stream_{i:02d}"
+        # Simulate streams that will have roughly equal split between control/test
+        control_count = 0
+        test_count = 0
+        
+        # Create enough streams to ensure minimum samples
+        for i in range(30):
+            stream_id = f"stream_{i:03d}"
             variant = framework.get_variant(stream_id)
             
-            # Record metrics
-            await framework.record_metric(stream_id, "interrupt_rate", 0.35)
-            await framework.record_metric(stream_id, "call_duration", 50.0)
+            # Record metrics - better for test variant
+            if variant == ABTestingFramework.VARIANT_TEST:
+                await framework.record_metric(stream_id, "interrupt_rate", 0.20)
+                await framework.record_metric(stream_id, "call_duration", 35.0)
+                test_count += 1
+            else:
+                await framework.record_metric(stream_id, "interrupt_rate", 0.35)
+                await framework.record_metric(stream_id, "call_duration", 50.0)
+                control_count += 1
             
             # Verify variant assignment is deterministic
             variant2 = framework.get_variant(stream_id)
             assert variant == variant2
         
-        # Simulate 10 test users with better metrics
-        for i in range(10):
-            stream_id = f"test_stream_{i:02d}"
-            variant = framework.get_variant(stream_id)
-            
-            # Record metrics
-            await framework.record_metric(stream_id, "interrupt_rate", 0.20)
-            await framework.record_metric(stream_id, "call_duration", 35.0)
+        # Verify we have minimum samples
+        assert control_count >= 10
+        assert test_count >= 10
         
         # Compute winner
         winner = framework.compute_winner()
         
         # Since test has better metrics, should recommend switchover
-        # (depends on hash distribution, but test metrics are better)
         assert winner in (ABTestingFramework.VARIANT_CONTROL, ABTestingFramework.VARIANT_TEST)
     
     @pytest.mark.asyncio
@@ -60,9 +64,13 @@ class TestABTestingFrameworkIntegration:
         # Should be only one variant (consistent)
         assert len(variants) == 1
         
+        # Record a metric to create the entry in _metrics
+        assigned_variant = variants.pop()
+        await framework.record_metric(stream_id, "interrupt_rate", 0.25)
+        
         # Verify metrics are associated with correct variant
         metrics = framework.get_variant_metrics(stream_id)
-        assert metrics["variant"] == variants.pop()
+        assert metrics["variant"] == assigned_variant
     
     @pytest.mark.asyncio
     async def test_metric_isolation_between_streams(self, framework):
