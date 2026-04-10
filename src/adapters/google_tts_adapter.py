@@ -1,6 +1,7 @@
 """GoogleTTSAdapter — TextToSpeechPort backed by Google Cloud Text-to-Speech."""
 
 import asyncio
+import re
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
@@ -11,6 +12,8 @@ from src.ports.text_to_speech_port import TextToSpeechPort
 
 # Segment size: 3200 bytes = 100ms at 16kHz PCM16LE (multiple of 320 bytes)
 _CHUNK_BYTES = 3200
+# Accumulate tokens until we have ~2-3 seconds of text (50-100 tokens typical)
+_TOKEN_ACCUMULATE_TARGET = 50
 
 
 class GoogleTTSAdapter(TextToSpeechPort):
@@ -52,6 +55,124 @@ class GoogleTTSAdapter(TextToSpeechPort):
 
         for segment in self._chunk_audio(response.response_id, audio_bytes):
             yield segment
+
+    async def synthesize_stream(
+        self,
+        stream_id: str,
+        response_id: str,
+        token_buffer,  # TokenRingBuffer
+    ) -> AsyncIterator[SpeechSegment]:
+        """
+        Synthesize from a stream of LLM tokens.
+
+        Accumulates tokens into phrases (detected by sentence-final punctuation or
+        token count), synthesizes each phrase, and yields audio segments.
+
+        Detects phrase boundaries on:
+        - Sentence-final punctuation: . ! ? ; :
+        - Token accumulation reaching target (~50 tokens)
+        - EOF signal from token_buffer
+
+        Args:
+            stream_id: Call identifier
+            response_id: Response identifier
+            token_buffer: TokenRingBuffer yielding LLM tokens
+
+        Yields:
+            SpeechSegment objects as phrases are synthesized
+        """
+        accumulated_text = ""
+        token_count = 0
+        segment_position = 0
+        loop = asyncio.get_event_loop()
+
+        while True:
+            # Get next token
+            token = await token_buffer.get()
+
+            if token is None:
+                # EOF: synthesize any remaining text
+                if accumulated_text.strip():
+                    audio_bytes = await loop.run_in_executor(
+                        None, self._synthesize_sync, accumulated_text
+                    )
+                    for segment in self._chunk_audio(response_id, audio_bytes):
+                        # Mark last segment from last phrase
+                        if segment.position == len(self._chunk_audio(response_id, audio_bytes)) - 1:
+                            yield SpeechSegment(
+                                response_id=segment.response_id,
+                                position=segment_position,
+                                audio_data=segment.audio_data,
+                                audio_format=segment.audio_format,
+                                is_last=True,
+                                timestamp=segment.timestamp,
+                            )
+                            segment_position += 1
+                        else:
+                            yield SpeechSegment(
+                                response_id=segment.response_id,
+                                position=segment_position,
+                                audio_data=segment.audio_data,
+                                audio_format=segment.audio_format,
+                                is_last=False,
+                                timestamp=segment.timestamp,
+                            )
+                            segment_position += 1
+                break
+
+            # Accumulate token
+            accumulated_text += token
+            token_count += 1
+
+            # Check if we should synthesize (phrase boundary detected)
+            if self._is_phrase_complete(accumulated_text, token_count):
+                if accumulated_text.strip():
+                    audio_bytes = await loop.run_in_executor(
+                        None, self._synthesize_sync, accumulated_text
+                    )
+                    for segment in self._chunk_audio(response_id, audio_bytes):
+                        yield SpeechSegment(
+                            response_id=segment.response_id,
+                            position=segment_position,
+                            audio_data=segment.audio_data,
+                            audio_format=segment.audio_format,
+                            is_last=False,
+                            timestamp=segment.timestamp,
+                        )
+                        segment_position += 1
+
+                # Reset for next phrase
+                accumulated_text = ""
+                token_count = 0
+
+    def _is_phrase_complete(self, text: str, token_count: int) -> bool:
+        """
+        Detect if accumulated text forms a complete phrase.
+
+        Phrase boundaries:
+        - Ends with sentence-final punctuation (. ! ? ; :)
+        - Accumulated token_count reaches target threshold
+
+        Args:
+            text: Accumulated text
+            token_count: Number of tokens accumulated
+
+        Returns:
+            True if phrase is complete and should be synthesized
+        """
+        # Token threshold
+        if token_count >= _TOKEN_ACCUMULATE_TARGET:
+            return True
+
+        # Sentence boundary: look for sentence-final punctuation at end
+        stripped = text.rstrip()
+        if stripped and stripped[-1] in ".!?;:":
+            # Make sure it's not a decimal point (e.g., "3.14")
+            if stripped[-1] == "." and len(stripped) > 1 and stripped[-2].isdigit():
+                return False
+            return True
+
+        return False
 
     def _synthesize_sync(self, text: str) -> bytes:
         """Synchronous Google TTS call (runs in thread pool)."""
@@ -119,4 +240,3 @@ class GoogleTTSAdapter(TextToSpeechPort):
             )
 
         return segments
-

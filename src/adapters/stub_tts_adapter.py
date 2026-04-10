@@ -106,3 +106,50 @@ class StubTTSAdapter(TextToSpeechPort):
                 is_last=is_last,
                 timestamp=now,
             )
+
+    async def synthesize_stream(
+        self,
+        stream_id: str,
+        response_id: str,
+        token_buffer,  # TokenRingBuffer
+    ) -> AsyncIterator[SpeechSegment]:
+        """
+        Synthesize from token stream (stub version).
+
+        Reads all tokens from buffer, ignores content, returns pre-generated
+        sine wave segments. Useful for testing streaming orchestration without
+        depending on Google TTS API.
+
+        Args:
+            stream_id: Call identifier
+            response_id: Response identifier
+            token_buffer: TokenRingBuffer yielding tokens (ignored by stub)
+
+        Yields:
+            SpeechSegment objects with pre-generated tone
+        """
+        self.call_count += 1
+
+        # Consume all tokens (ignore content)
+        while True:
+            token = await token_buffer.get()
+            if token is None:
+                break
+
+        # Yield pre-generated audio in chunks
+        data = self._pcm_data
+        total_chunks = max(1, len(data) // _CHUNK_BYTES)
+        now = datetime.now(timezone.utc)
+
+        for position in range(total_chunks):
+            start = position * _CHUNK_BYTES
+            chunk = data[start : start + _CHUNK_BYTES]
+            is_last = position == total_chunks - 1
+            yield SpeechSegment(
+                response_id=response_id,
+                position=position,
+                audio_data=chunk,
+                audio_format=self._audio_format,
+                is_last=is_last,
+                timestamp=now,
+            )
