@@ -122,7 +122,9 @@ def test_finalize_stream_flushes_buffered_audio() -> None:
         return await use_case.finalize_stream("s1")
 
     utterances = asyncio.run(run())
-    assert len(utterances) == 2
+    # FakeSTT yields 2 utterances per chunk (partial + final).
+    # With 2 buffered chunks, that's 4 utterances total.
+    assert len(utterances) == 4
     assert utterances[-1].text == "Buffered done"
     assert "s1" in buffer_manager.flush_calls
 

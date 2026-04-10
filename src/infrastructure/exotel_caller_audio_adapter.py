@@ -60,6 +60,7 @@ class ExotelCallerAudioAdapter(CallerAudioPort):
         })
 
         try:
+            logger.debug("Sending media to stream %s: bytes=%d", stream_id, len(segment.audio_data))
             await websocket.send_text(message)
             self._sent_segment_counts[stream_id] = self._sent_segment_counts.get(stream_id, 0) + 1
         except Exception as exc:

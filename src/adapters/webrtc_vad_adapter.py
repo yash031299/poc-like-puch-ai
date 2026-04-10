@@ -57,22 +57,9 @@ class WebRTCVADAdapter(VoiceActivityDetectorPort):
         """
         Detect voice activity using WebRTC VAD.
 
-        Args:
-            chunk: Audio chunk to analyze (must be compatible format)
-
-        Returns:
-            VoiceActivity.SPEECH if speech detected
-            VoiceActivity.SILENCE if only silence/noise
-            VoiceActivity.UNKNOWN if unable to determine
-
-        Raises:
-            ValueError: If audio format is incompatible
-
-        Business Rule: WebRTC VAD requires specific constraints:
-        - Sample rate: 8kHz, 16kHz, or 32kHz
-        - Frame duration: 10ms, 20ms, or 30ms
-        - Encoding: PCM16LE (16-bit linear PCM)
-        - Channels: mono (1)
+        This implementation will split larger audio chunks into valid
+        10/20/30ms frames and run VAD per-frame. If any frame contains
+        speech, the chunk is considered SPEECH.
         """
         if not self.is_compatible_format(chunk):
             raise ValueError(
@@ -85,24 +72,43 @@ class WebRTCVADAdapter(VoiceActivityDetectorPort):
         # Validate frame duration
         duration_ms = chunk.duration_seconds * 1000
         if not any(abs(duration_ms - valid_dur) < 1 for valid_dur in self._VALID_FRAME_DURATIONS_MS):
-            # Log warning but attempt detection anyway
             logger.debug(
                 f"WebRTC VAD prefers frame durations of {self._VALID_FRAME_DURATIONS_MS}ms, "
                 f"got {duration_ms:.1f}ms"
             )
 
-        try:
-            # Call WebRTC VAD
-            is_speech = self._vad.is_speech(
-                chunk.audio_data,
-                chunk.audio_format.sample_rate
-            )
+        sample_rate = chunk.audio_format.sample_rate
+        bytes_per_sample = 2  # PCM16LE
 
-            result = VoiceActivity.SPEECH if is_speech else VoiceActivity.SILENCE
+        # Choose a frame duration supported by WebRTC VAD (prefer 20ms)
+        frame_ms = 20
+        frame_bytes = int(sample_rate * (frame_ms / 1000.0) * bytes_per_sample)
+
+        if frame_bytes <= 0:
+            logger.error("Computed non-positive frame size for VAD")
+            return VoiceActivity.UNKNOWN
+
+        data = chunk.audio_data
+
+        try:
+            speech_found = False
+            # Iterate over frames; pad the last frame if necessary
+            for i in range(0, len(data), frame_bytes):
+                frame = data[i : i + frame_bytes]
+                if len(frame) < frame_bytes:
+                    # pad with zeros to required size (webrtcvad expects exact frame size)
+                    frame = frame + (b"\x00" * (frame_bytes - len(frame)))
+
+                is_speech = self._vad.is_speech(frame, sample_rate)
+                if is_speech:
+                    speech_found = True
+                    break
+
+            result = VoiceActivity.SPEECH if speech_found else VoiceActivity.SILENCE
 
             logger.debug(
                 f"VAD detected {result.value} for chunk seq={chunk.sequence_number} "
-                f"({chunk.size_bytes} bytes, {duration_ms:.1f}ms)"
+                f"({chunk.size_bytes} bytes, {duration_ms:.1f}ms, frame_ms={frame_ms})"
             )
 
             return result

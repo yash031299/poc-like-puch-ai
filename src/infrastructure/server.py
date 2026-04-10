@@ -92,6 +92,9 @@ async def lifespan(app: FastAPI):
 
     # VAD configuration
     vad_enabled = os.environ.get("VAD_ENABLED", "true").lower() in ("true", "1", "yes")
+    # In DEV_MODE, disable VAD by default to keep stub STT behaviour deterministic.
+    if dev_mode and "VAD_ENABLED" not in os.environ:
+        vad_enabled = False
     vad_silence_threshold = int(os.environ.get("VAD_SILENCE_THRESHOLD_MS", "700"))
     vad_sensitivity = int(os.environ.get("VAD_SENSITIVITY", "2"))
     max_buffer_duration = int(os.environ.get("MAX_SPEECH_BUFFER_SECONDS", "30"))

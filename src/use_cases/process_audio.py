@@ -67,11 +67,12 @@ class ProcessAudioUseCase:
                     f"Buffer flushed for stream {stream_id}: "
                     f"{len(flushed_chunks)} chunks buffered"
                 )
-                # Combine buffered chunks into one large utterance chunk for STT.
-                combined_chunk = self._combine_chunks(flushed_chunks)
-                utterances.extend(
-                    await self._transcribe_and_handle(session, stream_id, combined_chunk)
-                )
+                # Process each buffered chunk sequentially through STT so adapters
+                # that expect per-chunk calls (e.g., StubSTTAdapter) behave correctly.
+                # This preserves ordering while still avoiding immediate LLM calls
+                # until a final utterance is emitted by the STT adapter.
+                for c in flushed_chunks:
+                    utterances.extend(await self._transcribe_and_handle(session, stream_id, c))
 
         # ═══ LEGACY: Process every chunk immediately (if no buffer manager) ═══
         else:
@@ -102,8 +103,10 @@ class ProcessAudioUseCase:
         logger.info(
             "Final stream flush for %s: %d buffered chunks", stream_id, len(flushed_chunks)
         )
-        combined_chunk = self._combine_chunks(flushed_chunks)
-        utterances = await self._transcribe_and_handle(session, stream_id, combined_chunk)
+        # Process each buffered chunk sequentially (same rationale as add_chunk)
+        utterances: list[Utterance] = []
+        for c in flushed_chunks:
+            utterances.extend(await self._transcribe_and_handle(session, stream_id, c))
         await self._repo.save(session)
         return utterances
 
@@ -142,7 +145,8 @@ class ProcessAudioUseCase:
                 response_id=response.response_id,
             )
         except Exception as exc:
-            logger.error("AI pipeline failed stream=%s: %s", stream_id, exc)
+            # Avoid relying on module-level logger name resolution inside async tasks
+            logging.getLogger(__name__).error("AI pipeline failed stream=%s: %s", stream_id, exc, exc_info=True)
 
     async def _transcribe_and_handle(
         self,
@@ -156,10 +160,12 @@ class ProcessAudioUseCase:
         utterances: List[Utterance] = []
         session.set_thinking()
         async for utterance in self._stt.transcribe(stream_id, chunk):
+            logger.info("STT produced utterance for stream=%s final=%s text=%s", stream_id, utterance.is_final, getattr(utterance, 'text', ''))
             session.add_utterance(utterance)
             utterances.append(utterance)
 
             if utterance.is_final and self._generate and self._stream:
+                logger.info("Triggering AI pipeline for stream=%s utterance=%s", stream_id, utterance.utterance_id)
                 await self._trigger_ai_pipeline(stream_id, utterance.utterance_id)
 
         session.set_listening()

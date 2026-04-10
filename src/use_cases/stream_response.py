@@ -2,7 +2,10 @@
 
 from src.ports.session_repository_port import SessionRepositoryPort
 from src.ports.text_to_speech_port import TextToSpeechPort
+import logging
 from src.ports.caller_audio_port import CallerAudioPort
+
+logger = logging.getLogger(__name__)
 
 
 class StreamResponseUseCase:
@@ -39,11 +42,14 @@ class StreamResponseUseCase:
         if response is None:
             raise ValueError(f"AIResponse {response_id} not found in session {stream_id}")
 
+        logger.info("Streaming AI response to stream=%s response_id=%s", stream_id, response_id)
         session.set_speaking()
         async for segment in self._tts.synthesize(stream_id, response):
             session.add_speech_segment(segment)
+            logger.debug("Yielded speech segment pos=%s bytes=%d is_last=%s", getattr(segment, 'position', '?'), len(segment.audio_data), getattr(segment, 'is_last', False))
             await self._audio_out.send_segment(stream_id, segment)
 
         response.mark_delivered()
         session.set_listening()
         await self._repo.save(session)
+        logger.info("Finished streaming AI response to stream=%s response_id=%s", stream_id, response_id)

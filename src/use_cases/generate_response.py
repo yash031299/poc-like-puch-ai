@@ -2,7 +2,10 @@
 
 from src.domain.entities.ai_response import AIResponse
 from src.ports.session_repository_port import SessionRepositoryPort
+import logging
 from src.ports.language_model_port import LanguageModelPort
+
+logger = logging.getLogger(__name__)
 
 
 class GenerateResponseUseCase:
@@ -40,6 +43,7 @@ class GenerateResponseUseCase:
         # Build context from prior final turns
         context = [u.text for u in session.final_utterances if u.utterance_id != utterance_id]
 
+        logger.info("Generating AI response for stream=%s utterance=%s", stream_id, utterance_id)
         # Stream tokens and build response
         response = AIResponse(utterance_id=utterance_id, timestamp=datetime.now(timezone.utc))
         async for token in self._llm.generate(stream_id, utterance, context):
@@ -49,4 +53,5 @@ class GenerateResponseUseCase:
         session.add_ai_response(response)
 
         await self._repo.save(session)
+        logger.info("AI response generated for stream=%s response_id=%s", stream_id, response.response_id)
         return response

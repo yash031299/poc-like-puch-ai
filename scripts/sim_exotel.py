@@ -234,7 +234,10 @@ async def scenario_basic_call(base_ws: str, sample_rate: int) -> ScenarioResult:
                 await ws.send(_msg_media(stream_sid, i, sample_rate))
             r.ok("Sent 9 media chunks (StubSTT triggers on chunks 3, 6, 9)")
 
-            # 4. Collect server responses
+            # 4. Send stop then collect server responses
+            await ws.send(_msg_stop(stream_sid, 12))
+            r.ok("Sent 'stop' event")
+            await asyncio.sleep(0.5)
             msgs = await _drain(ws, timeout=5.0)
 
             media_back = _media_msgs(msgs)
@@ -263,11 +266,7 @@ async def scenario_basic_call(base_ws: str, sample_rate: int) -> ScenarioResult:
                     r.fail(f"TTS payload is not valid base64: {e}")
                 break  # validate first chunk only — same logic for all
 
-            # 5. Send stop
-            await ws.send(_msg_stop(stream_sid, 12))
-            r.ok("Sent 'stop' event — server should close WebSocket")
-
-    except websockets.exceptions.ConnectionRefusedError:
+    except ConnectionRefusedError:
         r.fail("Could not connect — is the server running?")
     except Exception as exc:
         r.fail(f"Unexpected error: {exc}")
@@ -302,6 +301,11 @@ async def scenario_clear_event(base_ws: str, sample_rate: int) -> ScenarioResult
                 await ws.send(_msg_media(stream_sid, i, sample_rate))
             r.ok("Sent 6 more media chunks after clear")
 
+            # Send stop to force final audio flush and TTS generation
+            await ws.send(_msg_stop(stream_sid, 12))
+            r.ok("Sent stop to finalize pending audio")
+
+            await asyncio.sleep(0.5)
             msgs = await _drain(ws, timeout=5.0)
 
             # Server must NOT have crashed
@@ -318,9 +322,6 @@ async def scenario_clear_event(base_ws: str, sample_rate: int) -> ScenarioResult
                 f"Server sent TTS audio after clear ({len(media_back)} chunk(s))",
                 "Server sent NO TTS audio after clear event",
             )
-
-            await ws.send(_msg_stop(stream_sid, 12))
-            r.ok("Sent stop — call ended cleanly")
 
     except Exception as exc:
         r.fail(f"Unexpected error: {exc}")
@@ -351,6 +352,7 @@ async def scenario_dtmf(base_ws: str, sample_rate: int) -> ScenarioResult:
             for i in range(4, 7):
                 await ws.send(_msg_media(stream_sid, i, sample_rate))
 
+            await asyncio.sleep(0.5)
             msgs = await _drain(ws, timeout=4.0)
 
             r.assert_true(
@@ -391,8 +393,9 @@ async def scenario_concurrent(base_ws: str, sample_rate: int) -> ScenarioResult:
             await ws.send(_msg_start(sid, sample_rate))
             for i in range(1, 4):
                 await ws.send(_msg_media(sid, i, sample_rate))
-            msgs = await _drain(ws, timeout=4.0)
             await ws.send(_msg_stop(sid, 6))
+            await asyncio.sleep(0.5)
+            msgs = await _drain(ws, timeout=4.0)
             return msgs
 
     try:
