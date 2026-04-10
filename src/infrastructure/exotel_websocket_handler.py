@@ -14,8 +14,12 @@ from src.ports.session_repository_port import SessionRepositoryPort
 from src.use_cases.accept_call import AcceptCallUseCase
 from src.use_cases.end_call import EndCallUseCase
 from src.use_cases.process_audio import ProcessAudioUseCase
+from src.infrastructure.logging_config import log_context
+from src.infrastructure.tracing import set_trace_id, get_tracer
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer(__name__)
+
 
 
 class ExotelWebSocketHandler:
@@ -90,8 +94,10 @@ class ExotelWebSocketHandler:
 
                 elif event == "start":
                     stream_id = await self._handle_start(message)
-                    if stream_id and self._audio_adapter:
-                        self._audio_adapter.register(stream_id, websocket)
+                    if stream_id:
+                        set_trace_id(stream_id)
+                        if self._audio_adapter:
+                            self._audio_adapter.register(stream_id, websocket)
 
                 elif event == "media" and stream_id:
                     await self._handle_media(message, stream_id)

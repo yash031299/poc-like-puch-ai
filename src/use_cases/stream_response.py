@@ -4,6 +4,7 @@ from src.ports.session_repository_port import SessionRepositoryPort
 from src.ports.text_to_speech_port import TextToSpeechPort
 import logging
 from src.ports.caller_audio_port import CallerAudioPort
+from src.infrastructure.tracing import traced_use_case
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class StreamResponseUseCase:
         self._repo = session_repo
         self._tts = tts
         self._audio_out = audio_out
+
+    @traced_use_case
 
     async def execute(self, stream_id: str, response_id: str) -> None:
         session = await self._repo.get(stream_id)

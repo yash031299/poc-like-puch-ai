@@ -1,6 +1,7 @@
 """ResetSessionUseCase — clear conversation context when Exotel sends 'clear' event."""
 
 from src.ports.session_repository_port import SessionRepositoryPort
+from src.infrastructure.tracing import traced_use_case
 
 
 class ResetSessionUseCase:
@@ -21,6 +22,8 @@ class ResetSessionUseCase:
 
     def __init__(self, session_repo: SessionRepositoryPort) -> None:
         self._repo = session_repo
+
+    @traced_use_case
 
     async def execute(self, stream_id: str) -> None:
         session = await self._repo.get(stream_id)

@@ -8,6 +8,7 @@ from src.domain.entities.utterance import Utterance
 from src.domain.services.audio_buffer_manager import AudioBufferManager
 from src.ports.session_repository_port import SessionRepositoryPort
 from src.ports.speech_to_text_port import SpeechToTextPort
+from src.infrastructure.tracing import traced_use_case
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class ProcessAudioUseCase:
         self._generate = generate_response
         self._stream = stream_response
 
+    @traced_use_case
     async def execute(self, stream_id: str, chunk: AudioChunk) -> List[Utterance]:
         session = await self._repo.get(stream_id)
         if session is None:

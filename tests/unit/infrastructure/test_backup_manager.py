@@ -1,0 +1,204 @@
+"""
+Unit tests for backup manager.
+"""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta
+from src.infrastructure.backup_manager import BackupManager
+
+
+@pytest.mark.asyncio
+class TestBackupManager:
+    """Test backup manager functionality."""
+
+    @pytest.fixture
+    def backup_manager(self):
+        """Create backup manager instance."""
+        with patch("boto3.client"):
+            return BackupManager(
+                db_url="postgresql://localhost/test",
+                s3_bucket="test-bucket",
+                retention_days=30,
+            )
+
+    @pytest.mark.asyncio
+    async def test_initialization(self, backup_manager):
+        """Test backup manager initialization."""
+        assert backup_manager.db_url == "postgresql://localhost/test"
+        assert backup_manager.s3_bucket == "test-bucket"
+        assert backup_manager.retention_days == 30
+
+    @pytest.mark.asyncio
+    async def test_compress(self, backup_manager):
+        """Test data compression."""
+        test_data = b"This is test data" * 100
+        compressed = backup_manager._compress(test_data)
+
+        # Verify compression
+        assert len(compressed) < len(test_data)
+
+        # Verify decompression
+        decompressed = backup_manager._decompress(compressed)
+        assert decompressed == test_data
+
+    @pytest.mark.asyncio
+    async def test_decompress(self, backup_manager):
+        """Test data decompression."""
+        original_data = b"Test data for decompression"
+        compressed = backup_manager._compress(original_data)
+        decompressed = backup_manager._decompress(compressed)
+
+        assert decompressed == original_data
+
+    @pytest.mark.asyncio
+    async def test_compress_decompression_roundtrip(self, backup_manager):
+        """Test compress/decompress roundtrip."""
+        test_cases = [
+            b"",
+            b"small",
+            b"x" * 10000,
+        ]
+
+        for test_data in test_cases:
+            compressed = backup_manager._compress(test_data)
+            decompressed = backup_manager._decompress(compressed)
+            assert decompressed == test_data
+
+    @pytest.mark.asyncio
+    async def test_backup_metadata_initialization(self, backup_manager):
+        """Test backup metadata table creation."""
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
+
+            await backup_manager.initialize()
+
+            # Verify table creation SQL was executed
+            mock_conn.execute.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_backup_manager_initialization(self, backup_manager):
+        """Test backup manager initialization."""
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
+
+            await backup_manager.initialize()
+
+            # Verify initialization
+            mock_conn.execute.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_to_s3(self, backup_manager):
+        """Test S3 upload."""
+        backup_manager.s3_client = MagicMock()
+        data = b"backup data"
+
+        await backup_manager._upload_to_s3("backups/test.sql.gz", data)
+
+        backup_manager.s3_client.put_object.assert_called_once()
+        call_args = backup_manager.s3_client.put_object.call_args
+        assert call_args.kwargs["Bucket"] == "test-bucket"
+        assert call_args.kwargs["Key"] == "backups/test.sql.gz"
+        assert call_args.kwargs["ServerSideEncryption"] == "AES256"
+
+    @pytest.mark.asyncio
+    async def test_download_from_s3(self, backup_manager):
+        """Test S3 download."""
+        backup_manager.s3_client = MagicMock()
+        test_data = b"downloaded backup"
+        backup_manager.s3_client.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=test_data))
+        }
+
+        result = await backup_manager._download_from_s3("backups/test.sql.gz")
+
+        assert result == test_data
+        backup_manager.s3_client.get_object.assert_called_once_with(
+            Bucket="test-bucket",
+            Key="backups/test.sql.gz",
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_from_s3(self, backup_manager):
+        """Test S3 deletion."""
+        backup_manager.s3_client = MagicMock()
+
+        await backup_manager._delete_from_s3("backups/test.sql.gz")
+
+        backup_manager.s3_client.delete_object.assert_called_once_with(
+            Bucket="test-bucket",
+            Key="backups/test.sql.gz",
+        )
+
+    @pytest.mark.asyncio
+    async def test_backup_status(self, backup_manager):
+        """Test getting backup status."""
+        mock_conn = AsyncMock()
+        mock_result = AsyncMock()
+        mock_result.fetchone = AsyncMock(return_value=(None,))
+        mock_result.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
+
+            status = await backup_manager.get_backup_status()
+
+            assert "retention_days" in status
+            assert status["retention_days"] == 30
+
+
+@pytest.mark.asyncio
+class TestBackupCreation:
+    """Test backup creation functionality."""
+
+    @pytest.fixture
+    def backup_manager(self):
+        """Create backup manager instance."""
+        with patch("boto3.client"):
+            return BackupManager(
+                db_url="postgresql://localhost/test",
+                s3_bucket="test-bucket",
+            )
+
+    @pytest.mark.asyncio
+    async def test_dump_database_empty(self, backup_manager):
+        """Test dumping empty database."""
+        with patch.object(backup_manager, "_get_connection") as mock_get_conn:
+            mock_conn = AsyncMock()
+            mock_result = AsyncMock()
+
+            mock_get_conn.return_value.__aenter__.return_value = mock_conn
+            mock_get_conn.return_value.__aexit__.return_value = None
+            mock_conn.execute.return_value = mock_result
+            mock_result.fetchall.return_value = []
+
+            result = await backup_manager._dump_database()
+
+            assert isinstance(result, bytes)
+            assert len(result) > 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_old_backups(self, backup_manager):
+        """Test cleanup of old backups."""
+        backup_manager.s3_client = MagicMock()
+
+        with patch.object(backup_manager, "_get_connection") as mock_get_conn:
+            mock_conn = AsyncMock()
+            mock_result = AsyncMock()
+
+            mock_get_conn.return_value.__aenter__.return_value = mock_conn
+            mock_get_conn.return_value.__aexit__.return_value = None
+            mock_conn.execute.return_value = mock_result
+            mock_result.fetchall.return_value = []
+            mock_conn.aclose = AsyncMock()
+
+            count = await backup_manager.cleanup_old_backups()
+
+            assert count >= 0

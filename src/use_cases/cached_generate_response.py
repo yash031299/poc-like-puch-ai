@@ -8,6 +8,7 @@ from src.domain.entities.ai_response import AIResponse
 from src.domain.services.semantic_cache import SemanticCache
 from src.ports.language_model_port import LanguageModelPort
 from src.ports.session_repository_port import SessionRepositoryPort
+from src.infrastructure.tracing import traced_use_case
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ class CachedGenerateResponseUseCase:
         self._repo = session_repo
         self._llm = llm
         self._cache = cache
+
+    @traced_use_case
 
     async def execute(self, stream_id: str, utterance_id: str) -> AIResponse:
         """

@@ -4,6 +4,7 @@ from src.domain.entities.ai_response import AIResponse
 from src.ports.session_repository_port import SessionRepositoryPort
 import logging
 from src.ports.language_model_port import LanguageModelPort
+from src.infrastructure.tracing import traced_use_case
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ class GenerateResponseUseCase:
     def __init__(self, session_repo: SessionRepositoryPort, llm: LanguageModelPort) -> None:
         self._repo = session_repo
         self._llm = llm
+
+    @traced_use_case
 
     async def execute(self, stream_id: str, utterance_id: str) -> AIResponse:
         from datetime import datetime, timezone

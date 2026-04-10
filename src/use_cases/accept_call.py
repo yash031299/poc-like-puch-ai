@@ -6,6 +6,7 @@ from src.domain.aggregates.conversation_session import ConversationSession
 from src.domain.value_objects.audio_format import AudioFormat
 from src.domain.value_objects.stream_identifier import StreamIdentifier
 from src.ports.session_repository_port import SessionRepositoryPort
+from src.infrastructure.tracing import traced_use_case
 
 
 class AcceptCallUseCase:
@@ -25,6 +26,7 @@ class AcceptCallUseCase:
     def __init__(self, session_repo: SessionRepositoryPort) -> None:
         self._repo = session_repo
 
+    @traced_use_case
     async def execute(
         self,
         stream_id: str,

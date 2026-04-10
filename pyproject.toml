@@ -31,6 +31,17 @@ dependencies = [
     "prometheus-client>=0.17.0",
     "psutil>=5.8.0",
     "numpy>=1.24.0",
+    # Disaster Recovery & Compliance (Phase 4)
+    "boto3>=1.26.0",
+    "cryptography>=41.0.0",
+    "sqlalchemy>=2.0.0",
+    # Phase 3E: Distributed Tracing
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=0.40b0",
+    "opentelemetry-instrumentation-fastapi>=0.40b0",
+    "opentelemetry-instrumentation-requests>=0.40b0",
+    "deprecated>=1.2.0",
 ]
 
 [project.optional-dependencies]

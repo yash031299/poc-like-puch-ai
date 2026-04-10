@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from src.infrastructure.logging_config import (
-    ContextInjectingFilter,
+    TraceContextInjectingFilter,
     configure_logging,
     log_context,
 )

@@ -11,6 +11,7 @@ from src.ports.caller_audio_port import CallerAudioPort
 from src.ports.language_model_port import LanguageModelPort
 from src.ports.session_repository_port import SessionRepositoryPort
 from src.ports.text_to_speech_port import TextToSpeechPort
+from src.infrastructure.tracing import traced_use_case
 
 if TYPE_CHECKING:
     pass
@@ -48,6 +49,8 @@ class StreamingGenerateResponseUseCase:
         self._llm = llm
         self._tts = tts
         self._audio_out = audio_out
+
+    @traced_use_case
 
     async def execute(
         self,
