@@ -238,7 +238,7 @@ class ExotelWebSocketHandler:
             if self._interrupt_detector:
                 session = await self._session_repo.get(stream_id)
                 if session:
-                    interrupted = await self._interrupt_detector.detect_interrupt(
+                    interrupted = self._interrupt_detector.detect_interrupt(
                         session, audio_data
                     )
                     if interrupted:
