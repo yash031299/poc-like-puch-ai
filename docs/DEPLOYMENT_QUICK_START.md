@@ -47,8 +47,8 @@ source venv/bin/activate  # macOS/Linux
 # OR
 venv\Scripts\activate  # Windows
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies from pyproject.toml
+pip install -e .
 ```
 
 ---
@@ -452,8 +452,8 @@ DEV_MODE=true python3 -m src.infrastructure.server
 # Make sure you're in the right directory
 cd poc-like-puch-ai
 
-# Reinstall dependencies
-pip install -r requirements.txt
+# Reinstall dependencies from pyproject.toml
+pip install -e .
 
 # Try again
 python3 -m src.infrastructure.server
@@ -470,7 +470,7 @@ DEV_MODE=true python3 -m src.infrastructure.server 2>&1 | tail -20
 # 2. Corrupted virtual environment → recreate it
 python3 -m venv venv_new
 source venv_new/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
 #### Problem: "Permission denied" error
@@ -576,8 +576,9 @@ python3 scripts/sim_exotel.py
 #### Problem: "pytest: command not found"
 
 ```bash
-# Install pytest
-pip install pytest pytest-asyncio pytest-cov
+# pytest is included in pyproject.toml dev dependencies
+# Ensure you ran: pip install -e .
+# This installs all dependencies including pytest, pytest-asyncio, pytest-cov
 
 # Try again
 python3 -m pytest tests/
