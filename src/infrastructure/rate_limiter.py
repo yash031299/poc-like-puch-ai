@@ -402,3 +402,8 @@ class HierarchicalRateLimiter:
                 'rate_limit_hits_by_tenant': self._rate_limit_hits.copy(),
                 'queue_depths_by_tenant': self._queue_depths.copy(),
             }
+
+
+# ── Backward Compatibility ─────────────────────────────────────────────────────
+# Alias for backward compatibility with existing code that imports RateLimiter
+RateLimiter = HierarchicalRateLimiter

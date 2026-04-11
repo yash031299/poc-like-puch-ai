@@ -13,7 +13,7 @@ Environment variables (see .env.example):
     SAMPLE_RATE              — 8000 | 16000 | 24000 (default: 8000)
     PORT                     — server port (default: 8000)
     LOG_LEVEL                — DEBUG | INFO | WARNING (default: INFO)
-    LOG_FORMAT               — text | json (default: text)
+    LOG_FORMAT               — text | JSON (default: text)
 
 DEV / LOCAL TESTING (no API keys needed):
     DEV_MODE=true python -m src.infrastructure.server
@@ -154,7 +154,10 @@ async def lifespan(app: FastAPI):
     # Rate limiting configuration
     ip_rate_limit = float(os.environ.get("RATE_LIMIT_IP", "100.0"))  # tokens/sec per IP
     stream_rate_limit = float(os.environ.get("RATE_LIMIT_STREAM", "50.0"))  # tokens/sec per stream
-    _rate_limiter = RateLimiter(ip_rate=ip_rate_limit, stream_rate=stream_rate_limit)
+    rate_limit_config = os.environ.get("RATE_LIMIT_CONFIG", "config/rate-limits.yaml")
+    
+    # Initialize hierarchical rate limiter with config file
+    _rate_limiter = RateLimiter(config_path=rate_limit_config)
     
     # Authentication configuration (IP whitelist + Bearer tokens)
     _authenticator = AuthenticatorConfig()

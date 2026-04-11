@@ -148,6 +148,7 @@ def _make_pipeline(stt=None, llm=None, tts=None, audio_out=None):
         accept_call=accept_uc,
         process_audio=process_uc,
         end_call=end_uc,
+        session_repo=repo,
         sample_rate=8000,
         audio_adapter=audio_out,
     )
