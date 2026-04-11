@@ -50,6 +50,7 @@ load_dotenv()  # Load .env file before anything reads os.environ
 # Configure structured logging as early as possible (before any module-level loggers fire)
 from src.infrastructure.logging_config import configure_logging, log_context  # noqa: E402
 configure_logging()
+logger = logging.getLogger(__name__)
 
 # Initialize OpenTelemetry tracing (skip in DEV_MODE to avoid overhead)
 if os.environ.get("DEV_MODE", "false").lower() not in ("true", "1", "yes"):
@@ -177,6 +178,7 @@ async def lifespan(app: FastAPI):
     # Default sensitivity: 0 in DEV_MODE (less aggressive for test tones), 2 in production
     default_sensitivity = "0" if dev_mode else "2"
     vad_sensitivity = int(os.environ.get("VAD_SENSITIVITY", default_sensitivity))
+    logger.debug(f"VAD config: dev_mode={dev_mode}, default_sensitivity={default_sensitivity}, vad_sensitivity={vad_sensitivity}")
     max_buffer_duration = int(os.environ.get("MAX_SPEECH_BUFFER_SECONDS", "30"))
     enable_thinking_indicator = os.environ.get("ENABLE_THINKING_INDICATOR", "false").lower() in ("true", "1", "yes")
 
