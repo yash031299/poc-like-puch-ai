@@ -171,7 +171,9 @@ async def lifespan(app: FastAPI):
     if dev_mode and "VAD_ENABLED" not in os.environ:
         vad_enabled = False
     vad_silence_threshold = int(os.environ.get("VAD_SILENCE_THRESHOLD_MS", "700"))
-    vad_sensitivity = int(os.environ.get("VAD_SENSITIVITY", "2"))
+    # Default sensitivity: 0 in DEV_MODE (less aggressive for test tones), 2 in production
+    default_sensitivity = "0" if dev_mode else "2"
+    vad_sensitivity = int(os.environ.get("VAD_SENSITIVITY", default_sensitivity))
     max_buffer_duration = int(os.environ.get("MAX_SPEECH_BUFFER_SECONDS", "30"))
     enable_thinking_indicator = os.environ.get("ENABLE_THINKING_INDICATOR", "false").lower() in ("true", "1", "yes")
 
