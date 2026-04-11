@@ -20,7 +20,7 @@ def _make_stream_logger(name: str = "test_logger") -> tuple:
     """Return (logger, stream) with a fresh StreamHandler for capture."""
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
-    handler.addFilter(ContextInjectingFilter())
+    handler.addFilter(TraceContextInjectingFilter())
     lgr = logging.getLogger(name + "_" + str(id(stream)))
     lgr.propagate = False
     lgr.addHandler(handler)
@@ -149,7 +149,7 @@ class TestJsonLogging:
 
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
-        handler.addFilter(ContextInjectingFilter())
+        handler.addFilter(TraceContextInjectingFilter())
         handler.setFormatter(
             JsonFormatter(fmt="%(message)s %(stream_id)s")
         )

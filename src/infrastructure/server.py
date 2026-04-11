@@ -272,15 +272,12 @@ async def lifespan(app: FastAPI):
         accept_call=accept_uc,
         process_audio=process_uc,
         end_call=end_uc,
+        session_repo=_session_repo,
         sample_rate=sample_rate,
         audio_adapter=audio_out,
         reset_session=reset_uc,
         stt=stt,
         buffer_manager=buffer_manager,
-        rate_limiter=_rate_limiter,
-        authenticator=_authenticator,
-        max_connections=max_connections,
-        get_active_connection_count=_get_active_connection_count,
     )
 
     mode_label = "DEV (stubs)" if dev_mode else ("HYBRID (real STT+TTS)" if hybrid_mode else "PRODUCTION")

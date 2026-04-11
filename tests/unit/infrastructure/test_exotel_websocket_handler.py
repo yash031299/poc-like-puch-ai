@@ -84,6 +84,23 @@ class FakeCallerAudioAdapter:
         return 0
 
 
+class FakeSessionRepository:
+    """Fake session repository for tests."""
+
+    def __init__(self):
+        self.sessions = {}
+
+    async def save(self, stream_id: str, session) -> None:
+        self.sessions[stream_id] = session
+
+    async def get(self, stream_id: str):
+        return self.sessions.get(stream_id)
+
+    async def delete(self, stream_id: str) -> None:
+        if stream_id in self.sessions:
+            del self.sessions[stream_id]
+
+
 def _make_session(stream_id="stream-test"):
     from src.domain.aggregates.conversation_session import ConversationSession
     from src.domain.value_objects.stream_identifier import StreamIdentifier
@@ -162,7 +179,8 @@ def test_handler_accepts_websocket_on_connect() -> None:
         accept_call=accept_uc,
         process_audio=FakeProcessAudio(),
         end_call=end_uc,
-    )
+    session_repo=FakeSessionRepository(),
+        )
 
     async def run():
         await handler.handle(ws)
@@ -183,7 +201,8 @@ def test_handler_calls_accept_use_case_on_start_event() -> None:
         accept_call=accept_uc,
         process_audio=FakeProcessAudio(),
         end_call=end_uc,
-    )
+    session_repo=FakeSessionRepository(),
+        )
 
     asyncio.run(handler.handle(ws))
 
@@ -210,7 +229,8 @@ def test_handler_calls_process_audio_on_media_event() -> None:
         accept_call=accept_uc,
         process_audio=process_uc,
         end_call=end_uc,
-    )
+    session_repo=FakeSessionRepository(),
+        )
 
     asyncio.run(handler.handle(ws))
 
@@ -230,7 +250,8 @@ def test_handler_calls_end_call_on_stop_event() -> None:
         accept_call=accept_uc,
         process_audio=FakeProcessAudio(),
         end_call=end_uc,
-    )
+    session_repo=FakeSessionRepository(),
+        )
 
     asyncio.run(handler.handle(ws))
 
@@ -250,6 +271,7 @@ def test_handler_registers_websocket_with_audio_adapter_on_start() -> None:
         process_audio=FakeProcessAudio(),
         end_call=FakeEndCall(),
         audio_adapter=audio_adapter,
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -271,6 +293,7 @@ def test_handler_unregisters_websocket_with_audio_adapter_on_stop() -> None:
         process_audio=FakeProcessAudio(),
         end_call=FakeEndCall(),
         audio_adapter=audio_adapter,
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -293,6 +316,7 @@ def test_handler_survives_connected_event_before_start() -> None:
         accept_call=FakeAcceptCall(session),
         process_audio=FakeProcessAudio(),
         end_call=FakeEndCall(),
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -316,6 +340,7 @@ def test_handler_uses_exotel_chunk_number_for_sequence() -> None:
         accept_call=FakeAcceptCall(session),
         process_audio=process_uc,
         end_call=FakeEndCall(),
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -338,6 +363,7 @@ def test_handler_survives_inbound_mark_event() -> None:
         accept_call=FakeAcceptCall(session),
         process_audio=FakeProcessAudio(),
         end_call=FakeEndCall(),
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -383,6 +409,7 @@ def test_handler_survives_inbound_clear_event() -> None:
         accept_call=FakeAcceptCall(session),
         process_audio=FakeProcessAudio(),
         end_call=FakeEndCall(),
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -407,6 +434,7 @@ def test_handler_reads_sample_rate_from_start_media_format() -> None:
         process_audio=process_uc,
         end_call=FakeEndCall(),
         sample_rate=8000,  # default 8000; should be overridden to 16000 from start message
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -425,6 +453,7 @@ def test_handler_closes_websocket_on_stop() -> None:
         accept_call=FakeAcceptCall(session),
         process_audio=FakeProcessAudio(),
         end_call=FakeEndCall(),
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
@@ -443,6 +472,7 @@ def test_handler_finalizes_pending_audio_on_stop() -> None:
         accept_call=FakeAcceptCall(session),
         process_audio=process_uc,
         end_call=FakeEndCall(),
+            session_repo=FakeSessionRepository(),
     )
 
     asyncio.run(handler.handle(ws))
