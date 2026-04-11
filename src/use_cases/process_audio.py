@@ -69,12 +69,17 @@ class ProcessAudioUseCase:
                     f"Buffer flushed for stream {stream_id}: "
                     f"{len(flushed_chunks)} chunks buffered"
                 )
-                # Process each buffered chunk sequentially through STT so adapters
-                # that expect per-chunk calls (e.g., StubSTTAdapter) behave correctly.
-                # This preserves ordering while still avoiding immediate LLM calls
-                # until a final utterance is emitted by the STT adapter.
-                for c in flushed_chunks:
-                    utterances.extend(await self._transcribe_and_handle(session, stream_id, c))
+                # Combine all flushed chunks into ONE logical utterance.
+                # This prevents duplicate utterance triggers in StubSTTAdapter:
+                # when processing 115 chunks in a loop, counter increments 115 times,
+                # causing yield at every 3rd chunk (~38 yields instead of 1).
+                # By combining into single chunk, we call STT once → one utterance.
+                combined_chunk = self._combine_chunks(flushed_chunks)
+                utterances.extend(await self._transcribe_and_handle(session, stream_id, combined_chunk))
+                
+                # Reset STT counter so next utterance starts fresh trigger_every cycle
+                if hasattr(self._stt, 'reset_chunk_count'):
+                    self._stt.reset_chunk_count(stream_id)
 
         # ═══ LEGACY: Process every chunk immediately (if no buffer manager) ═══
         else:

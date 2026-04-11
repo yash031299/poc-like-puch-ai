@@ -55,3 +55,13 @@ class StubSTTAdapter(SpeechToTextPort):
             )
         # On other chunks: yield nothing (simulates STT still listening)
         return
+
+    def reset_chunk_count(self, stream_id: str) -> None:
+        """
+        Reset per-stream chunk counter.
+        
+        Called after buffer flush to ensure next utterance starts a fresh
+        trigger_every cycle. This prevents duplicate utterances when processing
+        pre-buffered audio chunks (see process_audio.py).
+        """
+        self._counters[stream_id] = 0
