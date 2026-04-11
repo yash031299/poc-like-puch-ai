@@ -91,8 +91,21 @@ class BackupManager:
             """)
 
     async def _get_connection(self):
-        """Get database connection."""
-        return await psycopg.AsyncConnection.connect(self.db_url)
+        """Get database connection as a context manager."""
+        conn = await psycopg.AsyncConnection.connect(self.db_url)
+        
+        class AsyncConnContextManager:
+            def __init__(self, connection):
+                self.connection = connection
+            
+            async def __aenter__(self):
+                return self.connection
+            
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                await self.connection.aclose()
+                return False
+        
+        return AsyncConnContextManager(conn)
 
     async def create_backup(
         self,

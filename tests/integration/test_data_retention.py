@@ -32,10 +32,11 @@ class TestDataRetentionPolicy:
     @pytest.mark.asyncio
     async def test_initialize_tables(self, retention_policy):
         """Test table initialization."""
-        with patch.object(retention_policy, "_get_connection") as mock_get_conn:
-            mock_conn = AsyncMock()
-            mock_get_conn.return_value.__aenter__.return_value = mock_conn
-            mock_get_conn.return_value.__aexit__.return_value = None
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
 
             await retention_policy.initialize()
 
@@ -45,10 +46,11 @@ class TestDataRetentionPolicy:
     @pytest.mark.asyncio
     async def test_set_retention_policy(self, retention_policy):
         """Test setting retention policy."""
-        with patch.object(retention_policy, "_get_connection") as mock_get_conn:
-            mock_conn = AsyncMock()
-            mock_get_conn.return_value.__aenter__.return_value = mock_conn
-            mock_get_conn.return_value.__aexit__.return_value = None
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
 
             result = await retention_policy.set_retention_policy(
                 data_type="call_logs",
@@ -62,34 +64,33 @@ class TestDataRetentionPolicy:
     @pytest.mark.asyncio
     async def test_get_retention_policy(self, retention_policy):
         """Test getting retention policy."""
-        with patch.object(retention_policy, "_get_connection") as mock_get_conn:
-            mock_conn = AsyncMock()
-            mock_result = AsyncMock()
-
-            mock_get_conn.return_value.__aenter__.return_value = mock_conn
-            mock_get_conn.return_value.__aexit__.return_value = None
-
-            mock_conn.execute.return_value = mock_result
-            mock_result.fetchone.return_value = (
-                1,  # id
-                "call_logs",  # data_type
-                90,  # retention_days
-                True,  # anonymize
-                True,  # auto_delete
-                None,  # last_deletion
-                datetime.utcnow(),  # created_at
-                datetime.utcnow(),  # updated_at
-            )
-            mock_result.description = [
-                ("id",),
-                ("data_type",),
-                ("retention_days",),
-                ("anonymize_before_deletion",),
-                ("auto_delete",),
-                ("last_deletion",),
-                ("created_at",),
-                ("updated_at",),
-            ]
+        mock_conn = AsyncMock()
+        mock_result = AsyncMock()
+        mock_result.fetchone = AsyncMock(return_value=(
+            1,  # id
+            "call_logs",  # data_type
+            90,  # retention_days
+            True,  # anonymize
+            True,  # auto_delete
+            None,  # last_deletion
+            datetime.utcnow(),  # created_at
+            datetime.utcnow(),  # updated_at
+        ))
+        mock_result.description = [
+            ("id",),
+            ("data_type",),
+            ("retention_days",),
+            ("anonymize_before_deletion",),
+            ("auto_delete",),
+            ("last_deletion",),
+            ("created_at",),
+            ("updated_at",),
+        ]
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        mock_conn.aclose = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
 
             policy = await retention_policy.get_retention_policy("call_logs")
 
@@ -118,11 +119,12 @@ class TestDataRetentionPolicy:
     @pytest.mark.asyncio
     async def test_right_to_be_forgotten(self, retention_policy):
         """Test GDPR right to be forgotten."""
-        with patch.object(retention_policy, "_get_connection") as mock_get_conn:
-            mock_conn = AsyncMock()
-            mock_get_conn.return_value.__aenter__.return_value = mock_conn
-            mock_get_conn.return_value.__aexit__.return_value = None
-            mock_conn.aclose = AsyncMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_conn.aclose = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
 
             result = await retention_policy.right_to_be_forgotten("user123")
 
@@ -132,9 +134,7 @@ class TestDataRetentionPolicy:
     @pytest.mark.asyncio
     async def test_right_to_be_forgotten_invalid_user(self, retention_policy):
         """Test right to be forgotten with invalid user."""
-        with patch.object(retention_policy, "_get_connection") as mock_get_conn:
-            mock_get_conn.side_effect = Exception("Connection error")
-
+        with patch("psycopg.AsyncConnection.connect", side_effect=Exception("Connection error")):
             result = await retention_policy.right_to_be_forgotten("invalid_user")
 
             assert result is False

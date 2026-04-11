@@ -170,14 +170,14 @@ class TestBackupCreation:
     @pytest.mark.asyncio
     async def test_dump_database_empty(self, backup_manager):
         """Test dumping empty database."""
-        with patch.object(backup_manager, "_get_connection") as mock_get_conn:
-            mock_conn = AsyncMock()
-            mock_result = AsyncMock()
-
-            mock_get_conn.return_value.__aenter__.return_value = mock_conn
-            mock_get_conn.return_value.__aexit__.return_value = None
-            mock_conn.execute.return_value = mock_result
-            mock_result.fetchall.return_value = []
+        mock_conn = AsyncMock()
+        mock_result = AsyncMock()
+        mock_result.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        mock_conn.aclose = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
 
             result = await backup_manager._dump_database()
 
@@ -188,16 +188,15 @@ class TestBackupCreation:
     async def test_cleanup_old_backups(self, backup_manager):
         """Test cleanup of old backups."""
         backup_manager.s3_client = MagicMock()
-
-        with patch.object(backup_manager, "_get_connection") as mock_get_conn:
-            mock_conn = AsyncMock()
-            mock_result = AsyncMock()
-
-            mock_get_conn.return_value.__aenter__.return_value = mock_conn
-            mock_get_conn.return_value.__aexit__.return_value = None
-            mock_conn.execute.return_value = mock_result
-            mock_result.fetchall.return_value = []
-            mock_conn.aclose = AsyncMock()
+        
+        mock_conn = AsyncMock()
+        mock_result = AsyncMock()
+        mock_result.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        mock_conn.aclose = AsyncMock()
+        
+        with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as mock_connect:
+            mock_connect.return_value = mock_conn
 
             count = await backup_manager.cleanup_old_backups()
 
