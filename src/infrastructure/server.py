@@ -51,9 +51,12 @@ load_dotenv()  # Load .env file before anything reads os.environ
 from src.infrastructure.logging_config import configure_logging, log_context  # noqa: E402
 configure_logging()
 
-# Initialize OpenTelemetry tracing
-from src.infrastructure.tracing import init_tracing  # noqa: E402
-init_tracing()
+# Initialize OpenTelemetry tracing (skip in DEV_MODE to avoid overhead)
+if os.environ.get("DEV_MODE", "false").lower() not in ("true", "1", "yes"):
+    from src.infrastructure.tracing import init_tracing  # noqa: E402
+    init_tracing()
+else:
+    logger.info("DEV_MODE enabled — OpenTelemetry tracing disabled")
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
