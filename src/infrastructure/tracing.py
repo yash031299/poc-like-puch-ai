@@ -23,14 +23,27 @@ Usage:
 import functools
 import logging
 import os
+import socket
 from contextvars import ContextVar
 from typing import Any, Callable, Optional, TypeVar
+from urllib.parse import urlparse
 
-from opentelemetry import trace, context
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.trace import Status, StatusCode
+try:
+    from opentelemetry import trace, context
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    from opentelemetry.trace import Status, StatusCode
+    _OTEL_AVAILABLE = True
+except ModuleNotFoundError:
+    trace = None  # type: ignore
+    context = None  # type: ignore
+    TracerProvider = object  # type: ignore
+    SimpleSpanProcessor = None  # type: ignore
+    OTLPSpanExporter = None  # type: ignore
+    Status = None  # type: ignore
+    StatusCode = None  # type: ignore
+    _OTEL_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +52,60 @@ _tracer_provider: Optional[TracerProvider] = None
 _current_trace_id: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+class _NoOpSpan:
+    def __enter__(self) -> "_NoOpSpan":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        return None
+
+    def set_attribute(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def set_status(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+class _NoOpTracer:
+    def start_as_current_span(self, _name: str) -> _NoOpSpan:
+        return _NoOpSpan()
+
+
+_NOOP_TRACER = _NoOpTracer()
+
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in ("true", "1", "yes", "on")
+
+
+def _is_otlp_endpoint_reachable(endpoint: str, timeout_s: float = 0.25) -> bool:
+    """Best-effort check to avoid OTLP retry noise when no collector exists."""
+    try:
+        parsed = urlparse(endpoint)
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            return False
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def _bind_tracer_provider(provider: TracerProvider) -> TracerProvider:
+    """
+    Bind provider only when no SDK provider is currently active.
+
+    This avoids repeated "Overriding of current TracerProvider is not allowed"
+    warnings when tracing initialization is attempted multiple times.
+    """
+    current = trace.get_tracer_provider()
+    if isinstance(current, TracerProvider):
+        return current
+    trace.set_tracer_provider(provider)
+    return provider
 
 
 def init_tracing(
@@ -65,54 +132,100 @@ def init_tracing(
     """
     global _tracer_provider
 
+    if not _OTEL_AVAILABLE:
+        logger.info("OpenTelemetry package not installed; tracing disabled.")
+        return
+
+    # Explicit global switch for environments/modes that should not export traces.
+    if not _is_truthy(os.getenv("OTEL_ENABLED", "true")):
+        logger.info("OTEL_ENABLED=false; tracing disabled.")
+        return
+
+    # Reuse existing provider if already initialized in this process.
+    if _tracer_provider is not None:
+        logger.debug("Tracing already initialized; skipping re-initialization.")
+        return
+    existing_provider = trace.get_tracer_provider()
+    if isinstance(existing_provider, TracerProvider):
+        _tracer_provider = existing_provider
+        logger.debug("Tracing provider already configured; reusing existing provider.")
+        return
+
     # Read from environment
     jaeger_agent_host = os.getenv("JAEGER_AGENT_HOST", jaeger_agent_host)
     jaeger_agent_port = int(os.getenv("JAEGER_AGENT_PORT", "4317"))  # OTLP gRPC default
     service_name = os.getenv("JAEGER_SERVICE_NAME", service_name)
     sample_rate = float(os.getenv("OTEL_SAMPLE_RATE", sample_rate))
-    
+    sample_rate = max(0.0, min(1.0, sample_rate))
+
     # OTLP endpoint
-    otlp_endpoint = os.getenv(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        f"http://{jaeger_agent_host}:{jaeger_agent_port}"
-    )
+    otlp_endpoint_env = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    otlp_endpoint = otlp_endpoint_env or f"http://{jaeger_agent_host}:{jaeger_agent_port}"
+    exporter_enabled = _is_truthy(os.getenv("OTEL_EXPORTER_ENABLED", "true"))
+
+    # If using default localhost endpoint and collector is absent, disable exporter
+    # to avoid repetitive UNAVAILABLE retry logs in runtime.
+    if exporter_enabled and not otlp_endpoint_env and jaeger_agent_host in ("localhost", "127.0.0.1"):
+        if not _is_otlp_endpoint_reachable(otlp_endpoint):
+            exporter_enabled = False
+            logger.info(
+                "OTLP collector not reachable at %s; initializing tracing without exporter.",
+                otlp_endpoint,
+            )
 
     try:
-        # Create OTLP exporter
-        otlp_exporter = OTLPSpanExporter(
-            endpoint=otlp_endpoint,
-            insecure=True,  # Allow insecure connections for local testing
-        )
-
         # Create tracer provider with sampling
         from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
         _tracer_provider = TracerProvider(sampler=TraceIdRatioBased(sample_rate))
-        _tracer_provider.add_span_processor(SimpleSpanProcessor(otlp_exporter))
-        trace.set_tracer_provider(_tracer_provider)
+        if exporter_enabled:
+            otlp_exporter = OTLPSpanExporter(
+                endpoint=otlp_endpoint,
+                insecure=True,  # Allow insecure connections for local testing
+            )
+            _tracer_provider.add_span_processor(SimpleSpanProcessor(otlp_exporter))
+        _tracer_provider = _bind_tracer_provider(_tracer_provider)
 
         logger.info(
-            f"OpenTelemetry initialized: "
-            f"service={service_name}, "
-            f"otlp_endpoint={otlp_endpoint}, "
-            f"sample_rate={sample_rate}"
+            "OpenTelemetry initialized: service=%s sample_rate=%s exporter=%s endpoint=%s",
+            service_name,
+            sample_rate,
+            "enabled" if exporter_enabled else "disabled",
+            otlp_endpoint,
         )
     except Exception as e:
-        logger.warning(f"Failed to initialize OTLP exporter: {e}. Tracing disabled.")
-        # Fallback to no-op tracer
+        logger.warning("Failed to initialize tracing exporter: %s. Tracing running without exporter.", e)
+        # Fallback to local provider without exporter.
+        from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+
         _tracer_provider = TracerProvider(sampler=TraceIdRatioBased(sample_rate))
-        trace.set_tracer_provider(_tracer_provider)
+        _tracer_provider = _bind_tracer_provider(_tracer_provider)
 
 
-def get_tracer(name: str) -> trace.Tracer:
-    """Get or create a named tracer."""
+def get_tracer(name: str) -> Any:
+    """
+    Get or create a named tracer.
+    
+    In DEV_MODE, returns a no-op tracer to avoid warnings about uninitialized provider.
+    """
+    if not _OTEL_AVAILABLE:
+        return _NOOP_TRACER
+
+    # Explicitly disable tracing in low-overhead/test modes.
+    if (
+        os.getenv("DEV_MODE", "").lower() == "true"
+        or os.getenv("POC_SIMPLE_LLM_MODE", "").lower() == "true"
+        or not _is_truthy(os.getenv("OTEL_ENABLED", "true"))
+    ):
+        return _NOOP_TRACER
+    
     provider = trace.get_tracer_provider()
     if not isinstance(provider, TracerProvider):
         logger.warning("Tracer provider not initialized, using default")
     return trace.get_tracer(name)
 
 
-def set_trace_id(trace_id: str) -> None:
+def set_trace_id(trace_id: Optional[str]) -> None:
     """Set the current trace ID in context."""
     _current_trace_id.set(trace_id)
 
@@ -212,7 +325,8 @@ def traced_use_case(func: F) -> F:
                 span.set_attribute("status", "error")
                 span.set_attribute("error.type", type(e).__name__)
                 span.set_attribute("error.message", str(e))
-                span.set_status(Status(StatusCode.ERROR, str(e)))
+                if _OTEL_AVAILABLE and Status is not None and StatusCode is not None:
+                    span.set_status(Status(StatusCode.ERROR, str(e)))
                 raise
 
     @functools.wraps(func)
@@ -243,7 +357,8 @@ def traced_use_case(func: F) -> F:
                 span.set_attribute("status", "error")
                 span.set_attribute("error.type", type(e).__name__)
                 span.set_attribute("error.message", str(e))
-                span.set_status(Status(StatusCode.ERROR, str(e)))
+                if _OTEL_AVAILABLE and Status is not None and StatusCode is not None:
+                    span.set_status(Status(StatusCode.ERROR, str(e)))
                 raise
 
     # Return async wrapper for async functions, sync for sync
@@ -278,7 +393,8 @@ def traced_adapter_call(span_name: str, **span_attributes: Any) -> Callable[[F],
                     span.set_attribute("status", "error")
                     span.set_attribute("error.type", type(e).__name__)
                     span.set_attribute("error.message", str(e))
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
+                    if _OTEL_AVAILABLE and Status is not None and StatusCode is not None:
+                        span.set_status(Status(StatusCode.ERROR, str(e)))
                     raise
 
         @functools.wraps(func)
@@ -296,7 +412,8 @@ def traced_adapter_call(span_name: str, **span_attributes: Any) -> Callable[[F],
                     span.set_attribute("status", "error")
                     span.set_attribute("error.type", type(e).__name__)
                     span.set_attribute("error.message", str(e))
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
+                    if _OTEL_AVAILABLE and Status is not None and StatusCode is not None:
+                        span.set_status(Status(StatusCode.ERROR, str(e)))
                     raise
 
         return async_wrapper if "async" in func.__code__.co_names else sync_wrapper  # type: ignore

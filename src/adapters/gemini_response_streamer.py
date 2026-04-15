@@ -18,7 +18,7 @@ _SYSTEM_PROMPT = (
     "Be warm, natural, and conversational."
 )
 
-_DEFAULT_MODEL = "gemini-2.0-flash"
+_DEFAULT_MODEL = "gemini-2.5-flash"
 _FIRST_TOKEN_LATENCY_LIMIT_MS = 200
 
 

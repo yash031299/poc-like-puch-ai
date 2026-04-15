@@ -81,7 +81,7 @@ class FakeCallerAudio(CallerAudioPort):
         self.registered: dict = {}
         self.unregistered: list = []
 
-    def register(self, stream_id: str, websocket) -> None:
+    def register(self, stream_id: str, websocket, sample_rate=None) -> None:
         self.registered[stream_id] = websocket
 
     def unregister(self, stream_id: str) -> None:

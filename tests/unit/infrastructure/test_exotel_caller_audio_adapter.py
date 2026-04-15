@@ -8,6 +8,7 @@ Tests validate:
 """
 
 import asyncio
+import base64
 import json
 import pytest
 from datetime import datetime, timezone
@@ -51,6 +52,13 @@ class TestExotelCallerAudioAdapterRegistration:
         adapter.register("stream-123", mock_websocket)
         assert "stream-123" in adapter._stream_start_times
         assert isinstance(adapter._stream_start_times["stream-123"], float)
+        assert adapter._pacing_enabled["stream-123"] is False
+
+    def test_register_tracks_negotiated_sample_rate(self, adapter, mock_websocket):
+        """Adapter should track Exotel-negotiated sample rate per stream."""
+        adapter.register("stream-123", mock_websocket, sample_rate=24000)
+        assert adapter._stream_sample_rates["stream-123"] == 24000
+        assert adapter._pacing_enabled["stream-123"] is True
 
     def test_unregister_cleans_up_state(self, adapter, mock_websocket):
         """Test that unregister removes all tracking state."""
@@ -59,7 +67,11 @@ class TestExotelCallerAudioAdapterRegistration:
         
         assert "stream-123" not in adapter._connections
         assert "stream-123" not in adapter._sequence_numbers
+        assert "stream-123" not in adapter._media_chunk_numbers
+        assert "stream-123" not in adapter._media_timestamps_ms
         assert "stream-123" not in adapter._stream_start_times
+        assert "stream-123" not in adapter._stream_sample_rates
+        assert "stream-123" not in adapter._pacing_enabled
         assert "stream-123" not in adapter._sent_segment_counts
 
     def test_multiple_streams_have_independent_sequences(self, adapter, mock_websocket):
@@ -154,6 +166,29 @@ class TestExotelCallerAudioAdapterMediaEvents:
         assert int(message["media"]["timestamp"]) >= 0
 
     @pytest.mark.asyncio
+    async def test_media_event_includes_chunk_and_increments(
+        self, adapter, audio_format, mock_websocket
+    ):
+        """Test that outbound media includes chunk and increments per segment."""
+        adapter.register("stream-123", mock_websocket)
+
+        segment = SpeechSegment(
+            response_id="resp-1",
+            position=0,
+            audio_data=bytes(3200),
+            audio_format=audio_format,
+            is_last=False,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await adapter.send_segment("stream-123", segment)
+        await adapter.send_segment("stream-123", segment)
+
+        messages = [json.loads(call[0][0]) for call in mock_websocket.send_text.call_args_list]
+        chunks = [msg["media"]["chunk"] for msg in messages]
+        assert chunks == [1, 2]
+
+    @pytest.mark.asyncio
     async def test_timestamp_increases_monotonically(
         self, adapter, audio_format, mock_websocket
     ):
@@ -183,6 +218,33 @@ class TestExotelCallerAudioAdapterMediaEvents:
         assert timestamps[1] >= timestamps[0]
 
     @pytest.mark.asyncio
+    async def test_timestamp_advances_by_audio_duration(
+        self, adapter, mock_websocket
+    ):
+        """Timestamp should advance by chunk audio duration (stream timeline)."""
+        adapter.register("stream-123", mock_websocket)
+        fmt_8k = AudioFormat(sample_rate=8000, encoding="PCM16LE", channels=1)
+
+        # 3200 bytes at 8kHz PCM16 mono = 200ms of audio
+        segment = SpeechSegment(
+            response_id="resp-1",
+            position=0,
+            audio_data=bytes(3200),
+            audio_format=fmt_8k,
+            is_last=False,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await adapter.send_segment("stream-123", segment)
+        await adapter.send_segment("stream-123", segment)
+
+        messages = [json.loads(call[0][0]) for call in mock_websocket.send_text.call_args_list]
+        first_ts = int(messages[0]["media"]["timestamp"])
+        second_ts = int(messages[1]["media"]["timestamp"])
+        assert first_ts == 0
+        assert second_ts == 200
+
+    @pytest.mark.asyncio
     async def test_media_event_format_compliance(
         self, adapter, audio_format, mock_websocket
     ):
@@ -206,10 +268,39 @@ class TestExotelCallerAudioAdapterMediaEvents:
         assert message["event"] == "media"
         assert "sequence_number" in message
         assert "stream_sid" in message
+        assert "sequenceNumber" in message
+        assert "streamSid" in message
         assert "media" in message
+        assert "chunk" in message["media"]
         assert "payload" in message["media"]
         assert "timestamp" in message["media"]
+        assert "sequenceNumber" in message["media"]
         assert message["stream_sid"] == "stream-123"
+        assert message["streamSid"] == "stream-123"
+        assert isinstance(message["media"]["chunk"], int)
+
+    @pytest.mark.asyncio
+    async def test_send_segment_resamples_to_registered_sample_rate(
+        self, adapter, mock_websocket
+    ):
+        """If stream is negotiated at 8kHz, outbound 16kHz PCM should be resampled to 8kHz."""
+        adapter.register("stream-123", mock_websocket, sample_rate=8000)
+        fmt_16k = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
+        segment = SpeechSegment(
+            response_id="resp-1",
+            position=0,
+            audio_data=bytes(3200),  # 100ms at 16kHz PCM16 mono
+            audio_format=fmt_16k,
+            is_last=False,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await adapter.send_segment("stream-123", segment)
+
+        message = json.loads(mock_websocket.send_text.call_args[0][0])
+        decoded = base64.b64decode(message["media"]["payload"])
+        # 100ms at 8kHz PCM16 mono => 1600 bytes
+        assert len(decoded) == 1600
 
 
 class TestExotelCallerAudioAdapterChunkValidation:

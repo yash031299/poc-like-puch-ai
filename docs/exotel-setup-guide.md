@@ -284,14 +284,20 @@ Dial your Exotel phone number from any phone. You should see in your server logs
 Test your server locally without making a real call:
 
 ```bash
-# Start server
-python -m src.infrastructure.server
+# Start server in DEV mode (stub STT/LLM/TTS)
+DEV_MODE=true python -m src.infrastructure.server
 
-# In another terminal, run the simulator
-python scripts/local_ws_test.py --chunks 10 --sample-rate 8000
+# In another terminal, run protocol scenario simulator
+python scripts/sim_exotel.py --sample-rate 8000
+
+# Optional: run live mic+speaker simulator (interactive)
+# Requires sounddevice and local audio permissions
+python scripts/sim_exotel_live.py --ws-url ws://localhost:8000/stream?sample-rate=8000 --sample-rate 8000
 ```
 
-This sends a synthetic `connected → start → media → stop` sequence directly to your WebSocket.
+`sim_exotel.py` sends synthetic `connected → start → media → stop` scenarios.
+`sim_exotel_live.py` captures your microphone audio, streams Exotel-compatible media
+events to `/stream`, and plays bot media responses locally.
 
 ---
 

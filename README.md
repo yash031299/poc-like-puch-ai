@@ -2,7 +2,7 @@
 
 AI-powered phone conversation system using Exotel AgentStream with **Voice Activity Detection (VAD)** for intelligent buffering.
 
-**Flow:** Caller dials Exotel number → Exotel WebSocket → Our server → **VAD buffering** → STT → Gemini LLM → TTS → Audio back to caller
+**Flow:** Caller dials Exotel number → Exotel WebSocket → Our server → **VAD buffering** → STT → LLM → TTS → Audio back to caller
 
 ## ✨ NEW: Voice Activity Detection (VAD)
 
@@ -100,6 +100,22 @@ Verify it works:
 ```bash
 curl http://localhost:8000/health
 # {"status": "ok", "active_sessions": 0}
+```
+
+### Runtime Modes (quick reference)
+
+```bash
+# DEV: all stubs (fastest local protocol checks)
+DEV_MODE=true python -m src.infrastructure.server
+
+# HYBRID: real STT/TTS + stub LLM
+HYBRID_MODE=true python -m src.infrastructure.server
+
+# POC_SIMPLE: real STT/TTS + deterministic non-Gemini LLM (no streaming call to Gemini)
+POC_SIMPLE_LLM_MODE=true python -m src.infrastructure.server
+
+# PRODUCTION: real Gemini + real Google STT/TTS
+python -m src.infrastructure.server
 ```
 
 ### Step 4 — Expose with ngrok (for Exotel)
@@ -213,6 +229,16 @@ pytest tests/smoke/     # startup smoke tests
 | `VAD_SENSITIVITY` | `2` | WebRTC VAD sensitivity (0-3) |
 | `MAX_SPEECH_BUFFER_SECONDS` | `30` | Max buffered speech duration before forced flush |
 | `ENABLE_THINKING_INDICATOR` | `false` | Toggle thinking-indicator mode |
+| `POC_SIMPLE_LLM_MODE` | `false` | Use deterministic PoC LLM adapter (bypass Gemini streaming) |
+| `POC_SIMPLE_GREETING_RESPONSE` | see `.env.example` | Greeting response text for PoC simple mode |
+| `POC_SIMPLE_LLM_RESPONSE` | see `.env.example` | Default conversational paragraph for PoC simple mode |
+| `OTEL_ENABLED` | `true` | Global switch for tracing initialization |
+| `OTEL_EXPORTER_ENABLED` | `true` | Enable/disable OTLP exporter while keeping tracing API calls |
+| `GEMINI_FALLBACK_MODELS` | `gemini-2.5-flash-lite` | Comma-separated fallback Gemini models |
+| `GEMINI_RETRY_MAX_ATTEMPTS` | `3` | Retry attempts per Gemini model |
+| `GEMINI_RETRY_BASE_MS` | `250` | Base exponential backoff in ms |
+| `GEMINI_RETRY_JITTER_MS` | `150` | Random jitter added to retry backoff |
+| `LLM_DEGRADED_RESPONSE_TEXT` | default sentence | Spoken fallback text when LLM fails after retries/failover |
 
 ### Validation Snapshot
 

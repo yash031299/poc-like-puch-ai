@@ -56,7 +56,7 @@ echo ""
 # ── Start server ──────────────────────────────────────────────────────────────
 echo "▶  Starting server (DEV_MODE) ..."
 cd "$PROJECT_DIR"
-DEV_MODE=true LOG_LEVEL="$LOG_LEVEL" PORT="$PORT" SAMPLE_RATE="$SAMPLE_RATE" \
+DEV_MODE=true VAD_ENABLED=false LOG_LEVEL="$LOG_LEVEL" PORT="$PORT" SAMPLE_RATE="$SAMPLE_RATE" \
   "$PYTHON" -m src.infrastructure.server &
 SERVER_PID=$!
 

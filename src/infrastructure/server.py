@@ -36,6 +36,16 @@ HYBRID MODE (real STT+TTS, stub LLM — for testing when Gemini quota exhausted)
 
     Use this to test the STT audio buffering fix with real phone calls when
     your Gemini free tier quota is exhausted.
+
+POC SIMPLE LLM MODE (real STT+TTS, greeting once then non-streaming Gemini LLM):
+    POC_SIMPLE_LLM_MODE=true python -m src.infrastructure.server
+
+    In POC_SIMPLE_LLM_MODE:
+      GoogleSTTAdapter           → real Google Cloud Speech-to-Text
+      PoCGreetingThenLLMAdapter  → first greeting deterministic, then non-streaming Gemini
+      GoogleTTSAdapter           → real Google Cloud Text-to-Speech
+
+    This mode avoids Gemini streaming while still enabling live conversational replies.
 """
 
 import asyncio
@@ -47,22 +57,44 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file before anything reads os.environ
 
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in ("true", "1", "yes", "on")
+
+
 # Configure structured logging as early as possible (before any module-level loggers fire)
 from src.infrastructure.logging_config import configure_logging, log_context  # noqa: E402
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# Initialize OpenTelemetry tracing (skip in DEV_MODE to avoid overhead)
-if os.environ.get("DEV_MODE", "false").lower() not in ("true", "1", "yes"):
+
+def _initialize_runtime_tracing() -> None:
+    """
+    Initialize tracing based on selected runtime mode.
+
+    Tracing is disabled in DEV_MODE and POC_SIMPLE_LLM_MODE.
+    """
+    dev_mode = _is_truthy(os.environ.get("DEV_MODE", "false"))
+    poc_simple_mode = _is_truthy(os.environ.get("POC_SIMPLE_LLM_MODE", "false"))
+
+    if dev_mode:
+        logger.info("DEV_MODE enabled — OpenTelemetry tracing disabled")
+        return
+    if poc_simple_mode:
+        logger.info("POC_SIMPLE_LLM_MODE enabled — OpenTelemetry tracing disabled")
+        return
+
     from src.infrastructure.tracing import init_tracing  # noqa: E402
     init_tracing()
-else:
-    logger.info("DEV_MODE enabled — OpenTelemetry tracing disabled")
+
+
+_initialize_runtime_tracing()
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from src.adapters.gemini_llm_adapter import GeminiLLMAdapter
+from src.adapters.poc_greeting_then_llm_adapter import PoCGreetingThenLLMAdapter
 from src.adapters.google_stt_adapter import GoogleSTTAdapter
 from src.adapters.google_tts_adapter import GoogleTTSAdapter
 from src.adapters.stub_stt_adapter import StubSTTAdapter
@@ -147,9 +179,10 @@ async def lifespan(app: FastAPI):
     """Initialise all adapters and use cases on startup."""
     global _session_repo, _ws_handler, _rate_limiter, _authenticator
 
-    dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("true", "1", "yes")
+    dev_mode = _is_truthy(os.environ.get("DEV_MODE", "false"))
+    poc_simple_mode = _is_truthy(os.environ.get("POC_SIMPLE_LLM_MODE", "false"))
     # HYBRID_MODE: real STT+TTS but stub LLM (for testing when Gemini quota exhausted)
-    hybrid_mode = os.environ.get("HYBRID_MODE", "false").lower() in ("true", "1", "yes")
+    hybrid_mode = _is_truthy(os.environ.get("HYBRID_MODE", "false"))
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     sample_rate = int(os.environ.get("SAMPLE_RATE", "8000"))  # Exotel default is 8000 Hz
     language_code = os.environ.get("LANGUAGE_CODE", "en-US")
@@ -180,7 +213,17 @@ async def lifespan(app: FastAPI):
     vad_sensitivity = int(os.environ.get("VAD_SENSITIVITY", default_sensitivity))
     logger.debug(f"VAD config: dev_mode={dev_mode}, default_sensitivity={default_sensitivity}, vad_sensitivity={vad_sensitivity}")
     max_buffer_duration = int(os.environ.get("MAX_SPEECH_BUFFER_SECONDS", "30"))
-    enable_thinking_indicator = os.environ.get("ENABLE_THINKING_INDICATOR", "false").lower() in ("true", "1", "yes")
+    default_min_transcribe = "0" if dev_mode else "900"
+    min_transcribe_audio_ms = int(
+        os.environ.get("MIN_TRANSCRIBE_AUDIO_MS", default_min_transcribe)
+    )
+    utterance_dedup_window_ms = int(os.environ.get("UTTERANCE_DEDUP_WINDOW_MS", "2000"))
+    enable_thinking_indicator = _is_truthy(os.environ.get("ENABLE_THINKING_INDICATOR", "false"))
+
+    if sum(int(flag) for flag in (dev_mode, poc_simple_mode, hybrid_mode)) > 1:
+        logger.warning(
+            "Multiple runtime modes enabled simultaneously. Priority order: DEV_MODE > POC_SIMPLE_LLM_MODE > HYBRID_MODE > PRODUCTION."
+        )
 
     # ── Adapters ───────────────────────────────────────────────────────────────
     # STT/TTS/LLM providers are interchangeable — only this block changes when
@@ -192,11 +235,11 @@ async def lifespan(app: FastAPI):
         # Use DEV_MODE=true for local testing / Exotel simulator.
         logger.info(
             "🔧 DEV_MODE enabled — using stub adapters (no API keys required). "
-            "StubSTT triggers every 3 chunks. StubTTS emits 440 Hz sine wave."
+            "StubSTT triggers once per utterance flush. StubTTS emits 440 Hz sine wave."
         )
         stt = StubSTTAdapter(
             transcript="Hello, can you hear me? This is a local test.",
-            trigger_every=3,
+            trigger_every=1,
         )
         llm = StubLLMAdapter(
             response=(
@@ -205,6 +248,35 @@ async def lifespan(app: FastAPI):
             )
         )
         tts = StubTTSAdapter(sample_rate=sample_rate, duration_ms=400)
+    elif poc_simple_mode:
+        logger.info(
+            "🔧 POC_SIMPLE_LLM_MODE enabled — first greeting deterministic, then non-streaming Gemini replies."
+        )
+        if not gemini_key:
+            logger.warning(
+                "GEMINI_API_KEY not set in POC_SIMPLE_LLM_MODE — post-greeting turns will use fallback canned response."
+            )
+        stt = GoogleSTTAdapter(language_code=language_code, sample_rate=sample_rate)
+        llm = PoCGreetingThenLLMAdapter(
+            api_key=gemini_key,
+            model_name=os.environ.get("POC_SIMPLE_LLM_MODEL", "gemini-2.5-flash"),
+            fallback_response=os.environ.get(
+                "POC_SIMPLE_LLM_RESPONSE",
+                (
+                    "Hello! This is our PoC assistant. I can hear you and respond clearly. "
+                    "Please tell me what you would like to test next."
+                ),
+            ),
+            greeting_response=os.environ.get(
+                "POC_SIMPLE_GREETING_RESPONSE",
+                "Hi! Yes, I can hear you. The PoC mode is running correctly.",
+            ),
+        )
+        tts = GoogleTTSAdapter(
+            language_code=language_code,
+            voice_name=tts_voice,
+            sample_rate=sample_rate,
+        )
     elif hybrid_mode:
         # Real STT+TTS but stub LLM — useful when Gemini quota exhausted.
         # Use HYBRID_MODE=true to test STT buffering fix with real Google APIs.
@@ -262,7 +334,14 @@ async def lifespan(app: FastAPI):
     # ── Use cases ──────────────────────────────────────────────────────────────
     accept_uc = AcceptCallUseCase(session_repo=_session_repo)
     reset_uc = ResetSessionUseCase(session_repo=_session_repo)
-    generate_uc = GenerateResponseUseCase(session_repo=_session_repo, llm=llm)
+    generate_uc = GenerateResponseUseCase(
+        session_repo=_session_repo,
+        llm=llm,
+        degraded_response_text=os.environ.get(
+            "LLM_DEGRADED_RESPONSE_TEXT",
+            "I am facing a temporary delay right now. Please try again in a moment.",
+        ),
+    )
     stream_uc = StreamResponseUseCase(
         session_repo=_session_repo, tts=tts, audio_out=audio_out
     )
@@ -272,6 +351,8 @@ async def lifespan(app: FastAPI):
         buffer_manager=buffer_manager,  # NEW: Inject buffer manager
         generate_response=generate_uc,
         stream_response=stream_uc,
+        min_transcribe_audio_ms=min_transcribe_audio_ms,
+        dedup_window_ms=utterance_dedup_window_ms,
     )
     end_uc = EndCallUseCase(session_repo=_session_repo)
 
@@ -287,7 +368,15 @@ async def lifespan(app: FastAPI):
         buffer_manager=buffer_manager,
     )
 
-    mode_label = "DEV (stubs)" if dev_mode else ("HYBRID (real STT+TTS)" if hybrid_mode else "PRODUCTION")
+    mode_label = (
+        "DEV (stubs)"
+        if dev_mode
+        else (
+            "POC_SIMPLE (real STT+TTS)"
+            if poc_simple_mode
+            else ("HYBRID (real STT+TTS)" if hybrid_mode else "PRODUCTION")
+        )
+    )
     vad_status = "enabled" if vad_enabled else "disabled"
     logger.info(
         "✅ Puch AI Voice Server ready — mode=%s sample_rate=%dHz VAD=%s",
@@ -299,6 +388,11 @@ async def lifespan(app: FastAPI):
         logger.info(
             "   📊 VAD config: sensitivity=%d, silence=%dms, max_buffer=%ds",
             vad_sensitivity, vad_silence_threshold, max_buffer_duration
+        )
+        logger.info(
+            "   🧠 Utterance gate: min_transcribe=%dms dedup_window=%dms",
+            min_transcribe_audio_ms,
+            utterance_dedup_window_ms,
         )
     logger.info("   🔔 Thinking indicator: %s", "enabled" if enable_thinking_indicator else "disabled")
     
@@ -533,11 +627,13 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", "8000"))
     log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    reload_enabled = os.environ.get("RELOAD", "false").lower() == "true"
+    app_target = "src.infrastructure.server:app" if reload_enabled else app
     uvicorn.run(
-        "src.infrastructure.server:app",
+        app_target,
         host="0.0.0.0",
         port=port,
         log_level=log_level_str.lower(),
         loop="uvloop",  # uvicorn will fall back to asyncio if unavailable
-        reload=os.environ.get("RELOAD", "false").lower() == "true",
+        reload=reload_enabled,
     )

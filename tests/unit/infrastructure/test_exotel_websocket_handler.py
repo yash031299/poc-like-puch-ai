@@ -72,10 +72,12 @@ class FakeCallerAudioAdapter:
 
     def __init__(self):
         self.registered: dict = {}   # stream_id -> websocket
+        self.registered_sample_rates: dict = {}
         self.unregistered: list = []
 
-    def register(self, stream_id: str, websocket) -> None:
+    def register(self, stream_id: str, websocket, sample_rate=None) -> None:
         self.registered[stream_id] = websocket
+        self.registered_sample_rates[stream_id] = sample_rate
 
     def unregister(self, stream_id: str) -> None:
         self.unregistered.append(stream_id)
@@ -278,6 +280,31 @@ def test_handler_registers_websocket_with_audio_adapter_on_start() -> None:
 
     assert "stream-reg" in audio_adapter.registered
     assert audio_adapter.registered["stream-reg"] is ws
+    assert audio_adapter.registered_sample_rates["stream-reg"] == 16000
+
+
+def test_handler_registers_ws_with_sample_rate_from_start_event() -> None:
+    """Audio adapter should receive negotiated sample rate from start.media_format."""
+    from src.infrastructure.exotel_websocket_handler import ExotelWebSocketHandler
+
+    session = _make_session("stream-reg-sr")
+    ws = FakeWebSocket([
+        _start_msg_with_sample_rate("stream-reg-sr", 16000),
+        _stop_msg("stream-reg-sr"),
+    ])
+    audio_adapter = FakeCallerAudioAdapter()
+
+    handler = ExotelWebSocketHandler(
+        accept_call=FakeAcceptCall(session),
+        process_audio=FakeProcessAudio(),
+        end_call=FakeEndCall(),
+        audio_adapter=audio_adapter,
+            session_repo=FakeSessionRepository(),
+    )
+
+    asyncio.run(handler.handle(ws))
+
+    assert audio_adapter.registered_sample_rates["stream-reg-sr"] == 16000
 
 
 def test_handler_unregisters_websocket_with_audio_adapter_on_stop() -> None:

@@ -23,9 +23,17 @@ class GenerateResponseUseCase:
     7. Return the complete AIResponse
     """
 
-    def __init__(self, session_repo: SessionRepositoryPort, llm: LanguageModelPort) -> None:
+    def __init__(
+        self,
+        session_repo: SessionRepositoryPort,
+        llm: LanguageModelPort,
+        degraded_response_text: str = (
+            "I am having trouble right now. Please try again in a moment."
+        ),
+    ) -> None:
         self._repo = session_repo
         self._llm = llm
+        self._degraded_response_text = (degraded_response_text or "").strip()
 
     @traced_use_case
 
@@ -49,8 +57,28 @@ class GenerateResponseUseCase:
         logger.info("Generating AI response for stream=%s utterance=%s", stream_id, utterance_id)
         # Stream tokens and build response
         response = AIResponse(utterance_id=utterance_id, timestamp=datetime.now(timezone.utc))
-        async for token in self._llm.generate(stream_id, utterance, context):
-            response.append_text(token)
+        token_count = 0
+        try:
+            async for token in self._llm.generate(stream_id, utterance, context):
+                response.append_text(token)
+                token_count += 1
+        except Exception as exc:
+            logger.error(
+                "LLM generation failed stream=%s utterance=%s: %s",
+                stream_id,
+                utterance_id,
+                exc,
+                exc_info=True,
+            )
+            if token_count == 0 and self._degraded_response_text:
+                logger.warning(
+                    "Using degraded response text for stream=%s utterance=%s",
+                    stream_id,
+                    utterance_id,
+                )
+                response.append_text(self._degraded_response_text)
+            else:
+                raise
 
         response.complete()
         session.add_ai_response(response)

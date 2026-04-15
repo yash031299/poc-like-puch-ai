@@ -1,6 +1,7 @@
 """ProcessAudioUseCase — receive audio chunk, transcribe, and trigger AI pipeline."""
 
 import logging
+import time
 from typing import List, Optional
 
 from src.domain.entities.audio_chunk import AudioChunk
@@ -40,12 +41,17 @@ class ProcessAudioUseCase:
         buffer_manager: Optional[AudioBufferManager] = None,
         generate_response=None,
         stream_response=None,
+        min_transcribe_audio_ms: int = 900,
+        dedup_window_ms: int = 2000,
     ) -> None:
         self._repo = session_repo
         self._stt = stt
         self._buffer_manager = buffer_manager
         self._generate = generate_response
         self._stream = stream_response
+        self._min_transcribe_audio_ms = max(0, int(min_transcribe_audio_ms))
+        self._dedup_window_ms = max(0, int(dedup_window_ms))
+        self._last_final_by_stream: dict[str, tuple[str, float]] = {}
 
     @traced_use_case
     async def execute(self, stream_id: str, chunk: AudioChunk) -> List[Utterance]:
@@ -75,7 +81,17 @@ class ProcessAudioUseCase:
                 # causing yield at every 3rd chunk (~38 yields instead of 1).
                 # By combining into single chunk, we call STT once → one utterance.
                 combined_chunk = self._combine_chunks(flushed_chunks)
-                utterances.extend(await self._transcribe_and_handle(session, stream_id, combined_chunk))
+                if self._should_transcribe_chunk(combined_chunk):
+                    utterances.extend(
+                        await self._transcribe_and_handle(session, stream_id, combined_chunk)
+                    )
+                else:
+                    logger.info(
+                        "Skipping STT for short buffered utterance stream=%s duration_ms=%.1f threshold_ms=%d",
+                        stream_id,
+                        combined_chunk.duration_seconds * 1000.0,
+                        self._min_transcribe_audio_ms,
+                    )
                 
                 # Reset STT counter so next utterance starts fresh trigger_every cycle
                 if hasattr(self._stt, 'reset_chunk_count'):
@@ -110,10 +126,29 @@ class ProcessAudioUseCase:
         logger.info(
             "Final stream flush for %s: %d buffered chunks", stream_id, len(flushed_chunks)
         )
-        # Process each buffered chunk sequentially (same rationale as add_chunk)
         utterances: list[Utterance] = []
-        for c in flushed_chunks:
-            utterances.extend(await self._transcribe_and_handle(session, stream_id, c))
+        
+        # Combine all flushed chunks into ONE logical utterance (same fix as add_chunk).
+        # Prevents duplicate utterance triggers when finalize_stream processes buffered audio.
+        # Example: 34 buffered chunks with trigger_every=3 would yield 11 utterances if looped;
+        # by combining into 1 chunk, we call STT once → 1 utterance only.
+        combined_chunk = self._combine_chunks(flushed_chunks)
+        if self._should_transcribe_chunk(combined_chunk):
+            utterances.extend(
+                await self._transcribe_and_handle(session, stream_id, combined_chunk)
+            )
+        else:
+            logger.info(
+                "Skipping final STT flush for short buffered utterance stream=%s duration_ms=%.1f threshold_ms=%d",
+                stream_id,
+                combined_chunk.duration_seconds * 1000.0,
+                self._min_transcribe_audio_ms,
+            )
+        
+        # Reset STT counter so next utterance (if any) starts fresh trigger_every cycle
+        if hasattr(self._stt, 'reset_chunk_count'):
+            self._stt.reset_chunk_count(stream_id)
+        
         await self._repo.save(session)
         return utterances
 
@@ -167,6 +202,13 @@ class ProcessAudioUseCase:
         utterances: List[Utterance] = []
         session.set_thinking()
         async for utterance in self._stt.transcribe(stream_id, chunk):
+            if utterance.is_final and self._is_duplicate_final(stream_id, utterance.text):
+                logger.info(
+                    "Suppressing duplicate final utterance stream=%s text=%s",
+                    stream_id,
+                    getattr(utterance, "text", ""),
+                )
+                continue
             logger.info("STT produced utterance for stream=%s final=%s text=%s", stream_id, utterance.is_final, getattr(utterance, 'text', ''))
             session.add_utterance(utterance)
             utterances.append(utterance)
@@ -174,6 +216,37 @@ class ProcessAudioUseCase:
             if utterance.is_final and self._generate and self._stream:
                 logger.info("Triggering AI pipeline for stream=%s utterance=%s", stream_id, utterance.utterance_id)
                 await self._trigger_ai_pipeline(stream_id, utterance.utterance_id)
+            if utterance.is_final:
+                self._record_final_utterance(stream_id, utterance.text)
 
         session.set_listening()
         return utterances
+
+    def _should_transcribe_chunk(self, chunk: AudioChunk) -> bool:
+        """Gate STT calls for very short buffered utterances."""
+        duration_ms = chunk.duration_seconds * 1000.0
+        return duration_ms >= float(self._min_transcribe_audio_ms)
+
+    def _normalize_text(self, text: str) -> str:
+        return " ".join((text or "").strip().lower().split())
+
+    def _is_duplicate_final(self, stream_id: str, text: str) -> bool:
+        """Suppress near-immediate repeated final utterances with same normalized text."""
+        if self._dedup_window_ms <= 0:
+            return False
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return False
+        last = self._last_final_by_stream.get(stream_id)
+        if last is None:
+            return False
+        last_text, last_time = last
+        if last_text != normalized:
+            return False
+        elapsed_ms = (time.monotonic() - last_time) * 1000.0
+        return elapsed_ms <= float(self._dedup_window_ms)
+
+    def _record_final_utterance(self, stream_id: str, text: str) -> None:
+        normalized = self._normalize_text(text)
+        if normalized:
+            self._last_final_by_stream[stream_id] = (normalized, time.monotonic())

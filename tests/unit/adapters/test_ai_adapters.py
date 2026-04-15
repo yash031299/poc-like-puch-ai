@@ -38,7 +38,7 @@ def test_gemini_adapter_with_fake_client() -> None:
 
     adapter = GeminiLLMAdapter.__new__(GeminiLLMAdapter)
     adapter._client = FakeClient()
-    adapter._model_name = "gemini-2.0-flash"
+    adapter._model_name = "gemini-2.5-flash"
 
     utt = Utterance("How are you?", 0.95, True, datetime.now(timezone.utc))
 
@@ -52,6 +52,136 @@ def test_gemini_adapter_with_fake_client() -> None:
     assert "Hello " in tokens
     assert "there!" in tokens
     assert "" not in tokens  # empty chunks filtered
+
+
+def test_poc_greeting_then_llm_adapter_greets_once() -> None:
+    """PoC adapter should provide greeting on first turn, then LLM responses."""
+    from src.adapters.poc_greeting_then_llm_adapter import PoCGreetingThenLLMAdapter
+    from src.domain.entities.utterance import Utterance
+
+    adapter = PoCGreetingThenLLMAdapter(
+        api_key="",  # No API key for this test; fallback will be used
+        greeting_response="Hi! First response from PoC mode.",
+        fallback_response="Fallback response when LLM unavailable.",
+    )
+
+    greeting_utt = Utterance("hello can you hear me", 0.95, True, datetime.now(timezone.utc))
+    followup_utt = Utterance("tell me a joke", 0.95, True, datetime.now(timezone.utc))
+
+    async def run(stream_id, utt):
+        parts = []
+        async for token in adapter.generate(stream_id, utt, []):
+            parts.append(token)
+        return "".join(parts).strip()
+
+    # First turn: greeting
+    assert asyncio.run(run("stream1", greeting_utt)) == "Hi! First response from PoC mode."
+
+    # Second turn same stream: should attempt LLM (no API key, so falls back)
+    result = asyncio.run(run("stream1", followup_utt))
+    assert result == "Fallback response when LLM unavailable."
+
+    # New stream: should get greeting again
+    assert asyncio.run(run("stream2", greeting_utt)) == "Hi! First response from PoC mode."
+
+
+def test_gemini_adapter_retries_then_succeeds(monkeypatch) -> None:
+    """Gemini adapter should retry retriable failures and recover."""
+    from src.adapters.gemini_llm_adapter import GeminiLLMAdapter
+    from src.domain.entities.utterance import Utterance
+
+    class RetriableError(Exception):
+        status_code = 503
+
+    class FakeChunk:
+        def __init__(self, text): self.text = text
+
+    class FakeStream:
+        def __iter__(self):
+            return iter([FakeChunk("Recovered response")])
+
+    class FakeModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content_stream(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RetriableError("503 UNAVAILABLE")
+            return FakeStream()
+
+    class FakeClient:
+        def __init__(self):
+            self.models = FakeModels()
+
+    monkeypatch.setenv("GEMINI_RETRY_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("GEMINI_RETRY_BASE_MS", "1")
+    monkeypatch.setenv("GEMINI_RETRY_JITTER_MS", "0")
+
+    adapter = GeminiLLMAdapter.__new__(GeminiLLMAdapter)
+    adapter._client = FakeClient()
+    adapter._model_name = "gemini-2.5-flash"
+    adapter._fallback_models = []
+    adapter._max_attempts = 2
+    adapter._base_backoff_ms = 1
+    adapter._max_jitter_ms = 0
+
+    utt = Utterance("How are you?", 0.95, True, datetime.now(timezone.utc))
+
+    async def run():
+        tokens = []
+        async for token in adapter.generate("s1", utt, []):
+            tokens.append(token)
+        return tokens
+
+    tokens = asyncio.run(run())
+    assert "Recovered response" in tokens
+
+
+def test_gemini_adapter_fails_over_to_fallback_model() -> None:
+    """Gemini adapter should move to fallback model when primary fails."""
+    from src.adapters.gemini_llm_adapter import GeminiLLMAdapter
+    from src.domain.entities.utterance import Utterance
+
+    class RetriableError(Exception):
+        status_code = 503
+
+    class FakeChunk:
+        def __init__(self, text): self.text = text
+
+    class FakeModels:
+        def __init__(self):
+            self.models_called: list[str] = []
+
+        def generate_content_stream(self, *args, **kwargs):
+            model = kwargs.get("model")
+            self.models_called.append(model)
+            if model == "gemini-2.5-flash":
+                raise RetriableError("503 UNAVAILABLE")
+            return iter([FakeChunk("Fallback model response")])
+
+    class FakeClient:
+        def __init__(self):
+            self.models = FakeModels()
+
+    adapter = GeminiLLMAdapter.__new__(GeminiLLMAdapter)
+    adapter._client = FakeClient()
+    adapter._model_name = "gemini-2.5-flash"
+    adapter._fallback_models = ["gemini-2.5-flash-lite"]
+    adapter._max_attempts = 1
+    adapter._base_backoff_ms = 1
+    adapter._max_jitter_ms = 0
+
+    utt = Utterance("How are you?", 0.95, True, datetime.now(timezone.utc))
+
+    async def run():
+        tokens = []
+        async for token in adapter.generate("s1", utt, []):
+            tokens.append(token)
+        return tokens
+
+    tokens = asyncio.run(run())
+    assert "Fallback model response" in tokens
 
 
 # ── GoogleSTTAdapter ──────────────────────────────────────────────────────────

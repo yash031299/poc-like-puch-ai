@@ -110,7 +110,12 @@ def test_finalize_stream_flushes_buffered_audio() -> None:
     repo = FakeSessionRepo(session)
     stt = FakeSTT("Buffered done")
     buffer_manager = FakeBufferManager()
-    use_case = ProcessAudioUseCase(session_repo=repo, stt=stt, buffer_manager=buffer_manager)
+    use_case = ProcessAudioUseCase(
+        session_repo=repo,
+        stt=stt,
+        buffer_manager=buffer_manager,
+        min_transcribe_audio_ms=0,
+    )
 
     fmt = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
     buffer_manager.flushed["s1"] = [
@@ -122,9 +127,10 @@ def test_finalize_stream_flushes_buffered_audio() -> None:
         return await use_case.finalize_stream("s1")
 
     utterances = asyncio.run(run())
-    # FakeSTT yields 2 utterances per chunk (partial + final).
-    # With 2 buffered chunks, that's 4 utterances total.
-    assert len(utterances) == 4
+    # After fix: chunks are combined before STT call.
+    # 2 buffered chunks → 1 combined chunk → 1 STT call → FakeSTT yields 2 utterances (partial + final).
+    # Expected: 2 utterances (not 4), since combined chunks = 1 logical utterance.
+    assert len(utterances) == 2
     assert utterances[-1].text == "Buffered done"
     assert "s1" in buffer_manager.flush_calls
 
@@ -143,3 +149,66 @@ def test_finalize_stream_returns_empty_when_no_buffered_audio() -> None:
 
     utterances = asyncio.run(run())
     assert utterances == []
+
+
+def test_finalize_stream_skips_stt_for_short_buffered_audio() -> None:
+    from src.use_cases.process_audio import ProcessAudioUseCase
+    from src.domain.entities.audio_chunk import AudioChunk
+    from src.domain.value_objects.audio_format import AudioFormat
+
+    session = _make_active_session("s1")
+    repo = FakeSessionRepo(session)
+    stt = FakeSTT("Should not run")
+    buffer_manager = FakeBufferManager()
+    use_case = ProcessAudioUseCase(
+        session_repo=repo,
+        stt=stt,
+        buffer_manager=buffer_manager,
+        min_transcribe_audio_ms=900,
+    )
+
+    fmt = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
+    # 2x3200 bytes @16kHz mono PCM16 = ~200ms total (below threshold)
+    buffer_manager.flushed["s1"] = [
+        AudioChunk(1, datetime.now(timezone.utc), fmt, bytes(3200)),
+        AudioChunk(2, datetime.now(timezone.utc), fmt, bytes(3200)),
+    ]
+
+    async def run():
+        return await use_case.finalize_stream("s1")
+
+    utterances = asyncio.run(run())
+    assert utterances == []
+
+
+def test_duplicate_final_utterance_is_suppressed_within_window() -> None:
+    from src.use_cases.process_audio import ProcessAudioUseCase
+    from src.domain.entities.audio_chunk import AudioChunk
+    from src.domain.value_objects.audio_format import AudioFormat
+
+    session = _make_active_session("s1")
+    repo = FakeSessionRepo(session)
+    stt = FakeSTT("duplicate phrase")
+    use_case = ProcessAudioUseCase(
+        session_repo=repo,
+        stt=stt,
+        dedup_window_ms=5000,
+        min_transcribe_audio_ms=0,  # not relevant for direct/no-buffer path
+    )
+
+    fmt = AudioFormat(sample_rate=16000, encoding="PCM16LE", channels=1)
+    seq = {"value": 1}
+
+    async def run_once():
+        chunk = AudioChunk(seq["value"], datetime.now(timezone.utc), fmt, bytes(3200))
+        seq["value"] += 1
+        return await use_case.execute(stream_id="s1", chunk=chunk)
+
+    first = asyncio.run(run_once())
+    second = asyncio.run(run_once())
+
+    # First run has partial + final
+    assert len(first) == 2
+    # Second run keeps partial but suppresses duplicate final
+    assert len(second) == 1
+    assert second[0].is_final is False

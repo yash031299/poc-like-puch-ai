@@ -33,7 +33,8 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
     _env_path = Path(__file__).parent.parent / ".env"
-    load_dotenv(_env_path)
+    # For this validator, prefer repo .env over any stale shell-exported values.
+    load_dotenv(_env_path, override=True)
 except ImportError:
     pass  # dotenv not installed — rely on environment variables already being set
 
@@ -232,11 +233,8 @@ def check_gemini() -> bool:
 
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents="Reply with exactly one word: hello",
-            config=types.GenerateContentConfig(
-                max_output_tokens=10,
-            ),
+            model="gemini-2.5-flash",
+            contents="Reply with one word: hello",
         )
         text = response.text or ""
         if not text.strip():

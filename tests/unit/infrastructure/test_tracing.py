@@ -74,6 +74,20 @@ class TestTracingInitialization:
             assert span is not None
             # Span may not be recording if OTLP export fails, which is ok
 
+    def test_init_tracing_is_idempotent(self) -> None:
+        """Repeated init_tracing() calls should not raise or rebind provider noisily."""
+        init_tracing()
+        init_tracing()
+        tracer = get_tracer("idempotent-test")
+        assert tracer is not None
+
+    def test_init_tracing_disabled_with_env(self, monkeypatch) -> None:
+        """OTEL_ENABLED=false should disable tracing initialization."""
+        monkeypatch.setenv("OTEL_ENABLED", "false")
+        init_tracing()
+        tracer = get_tracer("disabled-test")
+        assert tracer is not None
+
 
 class TestTraceContextManagement:
     """Test trace context variable management."""

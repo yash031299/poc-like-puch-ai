@@ -29,6 +29,13 @@ class EmptyLLM:
             yield ""
 
 
+class FailingLLM:
+    async def generate(self, stream_id, utterance, context):
+        raise RuntimeError("503 UNAVAILABLE")
+        if False:
+            yield ""
+
+
 def _make_session_with_utterance(stream_id="s1"):
     from src.domain.aggregates.conversation_session import ConversationSession
     from src.domain.value_objects.stream_identifier import StreamIdentifier
@@ -96,3 +103,22 @@ def test_generate_response_raises_on_empty_streamed_output() -> None:
             await use_case.execute(stream_id="s1", utterance_id=utt.utterance_id)
 
     asyncio.run(run())
+
+
+def test_generate_response_uses_degraded_text_when_llm_fails() -> None:
+    from src.use_cases.generate_response import GenerateResponseUseCase
+
+    session, utt = _make_session_with_utterance()
+    repo = FakeSessionRepo(session)
+    use_case = GenerateResponseUseCase(
+        session_repo=repo,
+        llm=FailingLLM(),
+        degraded_response_text="I am temporarily unavailable. Please try again shortly.",
+    )
+
+    async def run():
+        return await use_case.execute(stream_id="s1", utterance_id=utt.utterance_id)
+
+    response = asyncio.run(run())
+    assert "temporarily unavailable" in response.text
+    assert response.state == "complete"

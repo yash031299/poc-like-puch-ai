@@ -53,6 +53,14 @@ echo "  Port    : $PORT"
 echo "  Mode    : PRODUCTION (real credentials from .env)"
 echo ""
 
+# Load .env once so both credential checks and server start use identical values.
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$PROJECT_DIR/.env"
+  set +a
+fi
+
 # ── Step 1: Run credential checker ───────────────────────────────────────────
 echo "▶  Running credential checks ..."
 echo ""
@@ -85,15 +93,6 @@ fi
 # ── Step 2: Start server in PRODUCTION mode ───────────────────────────────────
 echo "▶  Starting server in PRODUCTION mode ..."
 cd "$PROJECT_DIR"
-
-# Load .env so the server gets all credentials (dotenv in the server also loads
-# .env, but exporting here ensures subshell env vars are available immediately)
-if [[ -f "$PROJECT_DIR/.env" ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "$PROJECT_DIR/.env"
-  set +a
-fi
 
 PORT="$PORT" "$PYTHON" -m src.infrastructure.server &
 SERVER_PID=$!

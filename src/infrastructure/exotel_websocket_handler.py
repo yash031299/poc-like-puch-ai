@@ -97,7 +97,9 @@ class ExotelWebSocketHandler:
                     if stream_id:
                         set_trace_id(stream_id)
                         if self._audio_adapter:
-                            self._audio_adapter.register(stream_id, websocket)
+                            self._audio_adapter.register(
+                                stream_id, websocket, self._sample_rate
+                            )
 
                 elif event == "media" and stream_id:
                     await self._handle_media(message, stream_id)
@@ -109,13 +111,22 @@ class ExotelWebSocketHandler:
 
                 elif event == "stop":
                     if stream_id:
-                        # Flush any remaining buffered audio before ending call.
-                        # This preserves final caller utterance on stream teardown.
-                        await self._finalize_pending_audio(stream_id)
+                        stop_reason = message.get("stop", {}).get("reason", "unknown")
+                        logger.info("Exotel stop received: stream=%s reason=%s", stream_id, stop_reason)
+                        normalized_reason = str(stop_reason).strip().lower()
+                        should_finalize = not (
+                            "cancel" in normalized_reason
+                            or "call end" in normalized_reason
+                            or normalized_reason == "callended"
+                        )
+                        # If call is already canceled/ended by Exotel, skip final AI flush.
+                        # Otherwise, preserve trailing caller audio before teardown.
+                        if should_finalize:
+                            await self._finalize_pending_audio(stream_id)
                         pending_audio_finalized = True
                         if self._audio_adapter:
                             self._audio_adapter.unregister(stream_id)
-                        await self._handle_stop(stream_id)
+                        await self._handle_stop(stream_id, stop_reason)
                     break
 
                 elif event == "dtmf":
@@ -164,6 +175,7 @@ class ExotelWebSocketHandler:
 
         # Honor sample rate from start.media_format if Exotel provides it
         media_format = start_data.get("media_format", {})
+        media_encoding = str(media_format.get("encoding", "unknown"))
         if media_format.get("sample_rate"):
             try:
                 self._sample_rate = int(media_format["sample_rate"])
@@ -184,7 +196,13 @@ class ExotelWebSocketHandler:
                 audio_format=audio_format,
                 custom_parameters={str(k): str(v) for k, v in custom_params.items()} or None,
             )
-            logger.info("Call accepted: stream=%s caller=%s", stream_id, caller)
+            logger.info(
+                "Call accepted: stream=%s caller=%s sample_rate=%d encoding=%s",
+                stream_id,
+                caller,
+                self._sample_rate,
+                media_encoding,
+            )
         except ValueError as exc:
             logger.warning("Accept call failed: %s", exc)
 
@@ -263,11 +281,11 @@ class ExotelWebSocketHandler:
             # Continue processing despite error (graceful degradation)
             # Buffer manager will handle partial audio when VAD flushes
 
-    async def _handle_stop(self, stream_id: str) -> None:
+    async def _handle_stop(self, stream_id: str, stop_reason: str = "unknown") -> None:
         """Process 'stop' event: end the call session."""
         try:
             await self._end_call.execute(stream_id=stream_id)
-            logger.info("Call ended: stream=%s", stream_id)
+            logger.info("Call ended: stream=%s reason=%s", stream_id, stop_reason)
         except ValueError as exc:
             logger.warning("EndCall failed: %s", exc)
 

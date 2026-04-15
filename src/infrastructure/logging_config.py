@@ -26,7 +26,11 @@ from contextvars import ContextVar
 from typing import Any, Dict, Generator, Optional
 
 from pythonjsonlogger.json import JsonFormatter
-from opentelemetry import trace
+
+try:
+    from opentelemetry import trace
+except ModuleNotFoundError:
+    trace = None  # type: ignore
 
 
 # ── Context variable for per-request correlation IDs ─────────────────────────
@@ -38,11 +42,15 @@ class TraceContextInjectingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         # Add trace context if available
-        span = trace.get_current_span()
-        if span and span.is_recording():
-            ctx = span.get_span_context()
-            record.trace_id = format(ctx.trace_id, "032x")
-            record.span_id = format(ctx.span_id, "016x")
+        if trace is not None:
+            span = trace.get_current_span()
+            if span and span.is_recording():
+                ctx = span.get_span_context()
+                record.trace_id = format(ctx.trace_id, "032x")
+                record.span_id = format(ctx.span_id, "016x")
+            else:
+                record.trace_id = "0" * 32
+                record.span_id = "0" * 16
         else:
             record.trace_id = "0" * 32
             record.span_id = "0" * 16
